@@ -4,30 +4,32 @@ class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
 
   // SIGN UP
-  Future<User?> signUp(String email, String password) async {
+  Future<String?> signUp(String email, String password) async {
     try {
-      UserCredential result = await _auth.createUserWithEmailAndPassword(
+      await _auth.createUserWithEmailAndPassword(
         email: email,
         password: password,
       );
-      return result.user;
-    } catch (e) {
-      print(e);
       return null;
+    } on FirebaseAuthException catch (e) {
+      return e.message;
+    } catch (_) {
+      return "Something went wrong";
     }
   }
 
   // LOGIN
-  Future<User?> login(String email, String password) async {
+  Future<String?> login(String email, String password) async {
     try {
-      UserCredential result = await _auth.signInWithEmailAndPassword(
+      await _auth.signInWithEmailAndPassword(
         email: email,
         password: password,
       );
-      return result.user;
-    } catch (e) {
-      print(e);
       return null;
+    } on FirebaseAuthException catch (e) {
+      return e.message;
+    } catch (_) {
+      return "Something went wrong";
     }
   }
 
@@ -35,7 +37,4 @@ class AuthService {
   Future<void> logout() async {
     await _auth.signOut();
   }
-
-  // USER STREAM
-  Stream<User?> get user => _auth.authStateChanges();
 }
