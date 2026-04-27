@@ -85,4 +85,5 @@ class DefaultFirebaseOptions {
     storageBucket: 'neuromathixfyp.firebasestorage.app',
     measurementId: 'G-F9FGY0LRZ5',
   );
+
 }

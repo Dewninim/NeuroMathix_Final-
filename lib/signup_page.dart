@@ -1,52 +1,63 @@
 import 'package:flutter/material.dart';
-import 'auth_service.dart';
+import 'package:provider/provider.dart';
+import 'providers/auth_provider.dart';
 
-class SignupPage extends StatefulWidget {
-  @override
-  State<SignupPage> createState() => _SignupPageState();
-}
-
-class _SignupPageState extends State<SignupPage> {
+class SignupPage extends StatelessWidget {
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
-  final AuthService _auth = AuthService();
 
-  void signup() async {
-    String? error = await _auth.signUp(
-      emailController.text.trim(),
-      passwordController.text.trim(),
-    );
-
-    if (error == null) {
-      Navigator.pop(context); // go back to login
-    } else {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error)));
-    }
-  }
+  SignupPage({super.key});
 
   @override
   Widget build(BuildContext context) {
+    final auth = Provider.of<AppAuthProvider>(context);
+
+    Future<void> signup() async {
+      final provider = Provider.of<AppAuthProvider>(context, listen: false);
+
+      await provider.signUp(
+        emailController.text.trim(),
+        passwordController.text.trim(),
+      );
+
+      if (!context.mounted) return;
+
+      if (provider.errorMessage != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(provider.errorMessage!)),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Account created ✅")),
+        );
+
+        Navigator.pop(context);
+      }
+    }
+
     return Scaffold(
-      appBar: AppBar(title: Text("Signup")),
+      appBar: AppBar(title: const Text("Signup")),
       body: Padding(
-        padding: EdgeInsets.all(16),
+        padding: const EdgeInsets.all(16),
         child: Column(
           children: [
             TextField(
               controller: emailController,
-              decoration: InputDecoration(labelText: "Email"),
+              decoration: const InputDecoration(labelText: "Email"),
             ),
             TextField(
               controller: passwordController,
               obscureText: true,
-              decoration: InputDecoration(labelText: "Password"),
+              decoration: const InputDecoration(labelText: "Password"),
             ),
-            SizedBox(height: 20),
-            ElevatedButton(
-              onPressed: signup,
-              child: Text("Sign Up"),
-            ),
+            const SizedBox(height: 20),
+
+            auth.isLoading
+                ? const CircularProgressIndicator()
+                : ElevatedButton(
+                    onPressed: signup,
+                    child: const Text("Create Account"),
+                  ),
           ],
         ),
       ),

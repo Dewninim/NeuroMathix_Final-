@@ -2,38 +2,73 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../auth_service.dart';
 
-class AuthProvider extends ChangeNotifier {
+class AppAuthProvider extends ChangeNotifier {
   final AuthService _auth = AuthService();
 
   bool isLoading = false;
+  String? errorMessage;
 
-  Future<String?> login(String email, String password) async {
-    isLoading = true;
-    notifyListeners();
+  User? get user => FirebaseAuth.instance.currentUser;
 
-    String? result = await _auth.login(email, password);
+  Stream<User?> get userStream => _auth.userStream;
 
-    isLoading = false;
-    notifyListeners();
+  // LOGIN
+  Future<void> login(String email, String password) async {
+    try {
+      isLoading = true;
+      errorMessage = null;
+      notifyListeners();
 
-    return result;
+      await _auth.login(email, password);
+    } on FirebaseAuthException catch (e) {
+      errorMessage = getFirebaseErrorMessage(e);
+    } catch (e) {
+      errorMessage = "Login failed";
+    } finally {
+      isLoading = false;
+      notifyListeners();
+    }
   }
 
-  Future<String?> signUp(String email, String password) async {
-    isLoading = true;
-    notifyListeners();
+  // SIGNUP
+  Future<void> signUp(String email, String password) async {
+    try {
+      isLoading = true;
+      errorMessage = null;
+      notifyListeners();
 
-    String? result = await _auth.signUp(email, password);
-
-    isLoading = false;
-    notifyListeners();
-
-    return result;
+      await _auth.signUp(email, password);
+    } on FirebaseAuthException catch (e) {
+      errorMessage = getFirebaseErrorMessage(e);
+    } catch (e) {
+      errorMessage = "Signup failed";
+    } finally {
+      isLoading = false;
+      notifyListeners();
+    }
   }
 
+  // LOGOUT
   Future<void> logout() async {
     await _auth.logout();
   }
 
-  Stream<User?> get userStream => FirebaseAuth.instance.authStateChanges();
+String getFirebaseErrorMessage(FirebaseAuthException e) {
+  switch (e.code) {
+    case 'user-not-found':
+      return "No account found with this email.";
+    case 'wrong-password':
+      return "Incorrect password. Try again.";
+    case 'email-already-in-use':
+      return "This email is already registered.";
+    case 'invalid-email':
+      return "Enter a valid email address.";
+    case 'weak-password':
+      return "Password must be at least 6 characters.";
+    case 'network-request-failed':
+      return "Check your internet connection.";
+    default:
+      return "Something went wrong. Please try again.";
+  }
+}
 }

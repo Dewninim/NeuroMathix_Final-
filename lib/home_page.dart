@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
-import 'auth_service.dart';
+import 'package:provider/provider.dart';
+import 'providers/auth_provider.dart';
 
 class HomePage extends StatelessWidget {
-  final AuthService _auth = AuthService();
-
   @override
   Widget build(BuildContext context) {
+    final auth = Provider.of<AppAuthProvider>(context, listen: false);
+
     return Scaffold(
       appBar: AppBar(
         title: Text("Home"),
@@ -13,14 +14,12 @@ class HomePage extends StatelessWidget {
           IconButton(
             icon: Icon(Icons.logout),
             onPressed: () async {
-              await _auth.logout();
+              await auth.logout();
             },
-          )
+          ),
         ],
       ),
-      body: Center(
-        child: Text("Welcome! You are logged in 🎉"),
-      ),
+      body: Center(child: Text("Welcome")),
     );
   }
 }

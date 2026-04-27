@@ -1,73 +1,61 @@
 import 'package:flutter/material.dart';
-import 'auth_service.dart';
+import 'package:provider/provider.dart';
+import 'providers/auth_provider.dart';
 import 'signup_page.dart';
 
-class LoginPage extends StatefulWidget {
-  @override
-  State<LoginPage> createState() => _LoginPageState();
-}
-
-class _LoginPageState extends State<LoginPage> {
+class LoginPage extends StatelessWidget {
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
-  final AuthService _auth = AuthService();
 
-  bool isLoading = false;
-
-  void login() async {
-    if (emailController.text.isEmpty || passwordController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Please fill all fields")),
-      );
-      return;
-    }
-
-    setState(() => isLoading = true);
-
-    String? error = await _auth.login(
-      emailController.text.trim(),
-      passwordController.text.trim(),
-    );
-
-    setState(() => isLoading = false);
-
-    if (error != null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error)));
-    }
-  }
-
-  @override
-  void dispose() {
-    emailController.dispose();
-    passwordController.dispose();
-    super.dispose();
-  }
+  LoginPage({super.key});
 
   @override
   Widget build(BuildContext context) {
+    final auth = Provider.of<AppAuthProvider>(context);
+
+    Future<void> login() async {
+      final provider = Provider.of<AppAuthProvider>(context, listen: false);
+
+      await provider.login(
+        emailController.text.trim(),
+        passwordController.text.trim(),
+      );
+
+      if (!context.mounted) return;
+
+      if (provider.errorMessage != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(provider.errorMessage!)),
+        );
+      }
+      // ❗ No navigation needed (AuthGate handles it)
+    }
+
     return Scaffold(
-      appBar: AppBar(title: Text("Login")),
+      appBar: AppBar(title: const Text("Login")),
       body: Padding(
-        padding: EdgeInsets.all(16),
+        padding: const EdgeInsets.all(16),
         child: Column(
           children: [
             TextField(
               controller: emailController,
-              decoration: InputDecoration(labelText: "Email"),
+              decoration: const InputDecoration(labelText: "Email"),
             ),
             TextField(
               controller: passwordController,
               obscureText: true,
-              decoration: InputDecoration(labelText: "Password"),
+              decoration: const InputDecoration(labelText: "Password"),
             ),
-            SizedBox(height: 20),
+            const SizedBox(height: 20),
 
-            isLoading
-                ? CircularProgressIndicator()
-                : ElevatedButton(
-                    onPressed: login,
-                    child: Text("Login"),
+            auth.isLoading
+                ? const CircularProgressIndicator()
+                : SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: login,
+                      child: const Text("Login"),
+                    ),
                   ),
 
             TextButton(
@@ -77,8 +65,8 @@ class _LoginPageState extends State<LoginPage> {
                   MaterialPageRoute(builder: (_) => SignupPage()),
                 );
               },
-              child: Text("Create Account"),
-            )
+              child: const Text("Create Account"),
+            ),
           ],
         ),
       ),
