@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
-import 'services/auth_service.dart';
+import 'auth_service.dart';
+import 'signup_page.dart';
 
 class LoginPage extends StatefulWidget {
   @override
-  _LoginPageState createState() => _LoginPageState();
+  State<LoginPage> createState() => _LoginPageState();
 }
 
 class _LoginPageState extends State<LoginPage> {
@@ -11,34 +12,42 @@ class _LoginPageState extends State<LoginPage> {
   final passwordController = TextEditingController();
   final AuthService _auth = AuthService();
 
-  String message = "";
+  bool isLoading = false;
 
   void login() async {
-    var user = await _auth.login(
-      emailController.text,
-      passwordController.text,
+    if (emailController.text.isEmpty || passwordController.text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Please fill all fields")),
+      );
+      return;
+    }
+
+    setState(() => isLoading = true);
+
+    String? error = await _auth.login(
+      emailController.text.trim(),
+      passwordController.text.trim(),
     );
 
-    setState(() {
-      message = user != null ? "Login Success" : "Login Failed";
-    });
+    setState(() => isLoading = false);
+
+    if (error != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error)));
+    }
   }
 
-  void signup() async {
-    var user = await _auth.signUp(
-      emailController.text,
-      passwordController.text,
-    );
-
-    setState(() {
-      message = user != null ? "Signup Success" : "Signup Failed";
-    });
+  @override
+  void dispose() {
+    emailController.dispose();
+    passwordController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text("Firebase Auth")),
+      appBar: AppBar(title: Text("Login")),
       body: Padding(
         padding: EdgeInsets.all(16),
         child: Column(
@@ -49,14 +58,27 @@ class _LoginPageState extends State<LoginPage> {
             ),
             TextField(
               controller: passwordController,
-              decoration: InputDecoration(labelText: "Password"),
               obscureText: true,
+              decoration: InputDecoration(labelText: "Password"),
             ),
             SizedBox(height: 20),
-            ElevatedButton(onPressed: login, child: Text("Login")),
-            ElevatedButton(onPressed: signup, child: Text("Sign Up")),
-            SizedBox(height: 20),
-            Text(message),
+
+            isLoading
+                ? CircularProgressIndicator()
+                : ElevatedButton(
+                    onPressed: login,
+                    child: Text("Login"),
+                  ),
+
+            TextButton(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => SignupPage()),
+                );
+              },
+              child: Text("Create Account"),
+            )
           ],
         ),
       ),
