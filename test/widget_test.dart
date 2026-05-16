@@ -1,30 +1,35 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
-import 'package:neuromathix/main.dart';
+import 'package:neuromathix/services/student_learning_service.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  test(
+    'mock student dashboard exposes recommended concepts for feedback routing',
+    () async {
+      const service = MockStudentLearningService();
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+      final dashboard = await service.getDashboard('student-demo-kawya');
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+      expect(dashboard.recommendedConcepts, isNotEmpty);
+      expect(dashboard.recommendedConcepts.first.feedbackId, isNotEmpty);
+      expect(
+        dashboard.retentionTrend.every((point) => point.retentionPercent >= 0),
+        isTrue,
+      );
+    },
+  );
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  test('feedback report can be exported as a markdown table', () async {
+    const service = MockStudentLearningService();
+
+    final report = await service.buildFeedbackReport(
+      studentId: 'student-demo-kawya',
+      feedbackId: 'memory-types',
+    );
+
+    expect(report.rows, isNotEmpty);
+    expect(
+      report.asMarkdownTable(),
+      contains('| Metric | Value | Interpretation | Recommendation |'),
+    );
   });
 }

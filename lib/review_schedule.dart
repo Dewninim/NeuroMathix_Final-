@@ -1,4 +1,8 @@
 import 'package:flutter/material.dart';
+import 'models/student_learning_models.dart';
+import 'pages/explainable_ai_feedback_page.dart';
+import 'pages/student_dashboard_page.dart';
+import 'widgets/student_app_shell.dart';
 
 class ReviewSchedulePage extends StatefulWidget {
   const ReviewSchedulePage({super.key});
@@ -29,101 +33,97 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF5F6FA),
-      body: Row(
-        children: [
-          const _Sidebar(),
-          Expanded(
-            child: SafeArea(
-              child: Column(
-                children: [
-                  _TopBar(
-                    userName: 'Chamika',
-                    onMenu: () {},
-                    notificationCount: 3,
+    return StudentAppShell(
+      activeSection: StudentNavSection.schedule,
+      userName: 'Kawya',
+      notificationCount: 3,
+      onSectionSelected: (section) {
+        if (section == StudentNavSection.dashboard) {
+          Navigator.push(context, MaterialPageRoute(builder: (_) => const StudentDashboardPage()));
+        } else if (section == StudentNavSection.aiFeedback) {
+          Navigator.push(context, MaterialPageRoute(builder: (_) => const ExplainableAiFeedbackPage()));
+        } else if (section == StudentNavSection.schedule) {
+          // Do nothing
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Section not wired yet.')),
+          );
+        }
+      },
+      child: Container(
+        color: const Color(0xFFF5F6FA),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(18, 10, 18, 18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const _PageHeader(),
+              const SizedBox(height: 12),
+              _StatsRow(
+                urgentModules: urgentModules,
+                thisWeekCount: thisWeekCount,
+                plannedTime: plannedTime,
+                streakDays: streakDays,
+              ),
+              const SizedBox(height: 14),
+              _CalendarCard(
+                visibleMonth: visibleMonth,
+                selectedDay: selectedDay,
+                isMonthView: isMonthView,
+                onToggleView: (v) => setState(() => isMonthView = v),
+                onPrevMonth: () => setState(() {
+                  visibleMonth = DateTime(visibleMonth.year, visibleMonth.month - 1, 1);
+                }),
+                onNextMonth: () => setState(() {
+                  visibleMonth = DateTime(visibleMonth.year, visibleMonth.month + 1, 1);
+                }),
+                onSelectDay: (d) => setState(() => selectedDay = d),
+                markedDays: const {
+                  11,
+                },
+                onBackToToday: () => setState(() {
+                  visibleMonth = DateTime.now();
+                  selectedDay = DateTime.now();
+                }),
+              ),
+              const SizedBox(height: 14),
+              _SelectedDaySummaryCard(
+                sessions: 3,
+                planned: const Duration(hours: 2, minutes: 35),
+                mainFocus: 'Matrix Theory',
+                completion: 0.33,
+              ),
+              const SizedBox(height: 14),
+              _TopicsCard(
+                topics: topics.where((t) => _matchesFilter(t.priority, filter)).toList(),
+                filter: filter,
+                onFilterChanged: (f) => setState(() => filter = f),
+              ),
+              const SizedBox(height: 14),
+              _ScheduleTableCard(
+                rows: const [
+                  _ScheduleRow(
+                    subject: 'Matrix Theory',
+                    startTime: TimeOfDay(hour: 18, minute: 0),
+                    endTimeLabel: 'Ends 18:45',
                   ),
-                  Expanded(
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.fromLTRB(18, 10, 18, 18),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const _PageHeader(),
-                          const SizedBox(height: 12),
-                          _StatsRow(
-                            urgentModules: urgentModules,
-                            thisWeekCount: thisWeekCount,
-                            plannedTime: plannedTime,
-                            streakDays: streakDays,
-                          ),
-                          const SizedBox(height: 14),
-                          _CalendarCard(
-                            visibleMonth: visibleMonth,
-                            selectedDay: selectedDay,
-                            isMonthView: isMonthView,
-                            onToggleView: (v) => setState(() => isMonthView = v),
-                            onPrevMonth: () => setState(() {
-                              visibleMonth = DateTime(visibleMonth.year, visibleMonth.month - 1, 1);
-                            }),
-                            onNextMonth: () => setState(() {
-                              visibleMonth = DateTime(visibleMonth.year, visibleMonth.month + 1, 1);
-                            }),
-                            onSelectDay: (d) => setState(() => selectedDay = d),
-                            markedDays: const {
-                              // red dot example
-                              // Use only day-of-month for demo; in real app use full date key.
-                              11,
-                            },
-                            onBackToToday: () => setState(() {
-                              visibleMonth = DateTime.now();
-                              selectedDay = DateTime.now();
-                            }),
-                          ),
-                          const SizedBox(height: 14),
-                          _SelectedDaySummaryCard(
-                            sessions: 3,
-                            planned: const Duration(hours: 2, minutes: 35),
-                            mainFocus: 'Matrix Theory',
-                            completion: 0.33,
-                          ),
-                          const SizedBox(height: 14),
-                          _TopicsCard(
-                            topics: topics.where((t) => _matchesFilter(t.priority, filter)).toList(),
-                            filter: filter,
-                            onFilterChanged: (f) => setState(() => filter = f),
-                          ),
-                          const SizedBox(height: 14),
-                          _ScheduleTableCard(
-                            rows: const [
-                              _ScheduleRow(
-                                subject: 'Matrix Theory',
-                                startTime: TimeOfDay(hour: 18, minute: 0),
-                                endTimeLabel: 'Ends 18:45',
-                              ),
-                              _ScheduleRow(
-                                subject: 'Calculus',
-                                startTime: TimeOfDay(hour: 19, minute: 0),
-                                endTimeLabel: 'Ends 19:35',
-                              ),
-                              _ScheduleRow(
-                                subject: 'Linear Algebra',
-                                startTime: TimeOfDay(hour: 20, minute: 0),
-                                endTimeLabel: 'Ends 20:40',
-                              ),
-                            ],
-                            onAutoArrange: () {},
-                            onSave: () {},
-                          ),
-                        ],
-                      ),
-                    ),
+                  _ScheduleRow(
+                    subject: 'Calculus',
+                    startTime: TimeOfDay(hour: 19, minute: 0),
+                    endTimeLabel: 'Ends 19:35',
+                  ),
+                  _ScheduleRow(
+                    subject: 'Linear Algebra',
+                    startTime: TimeOfDay(hour: 20, minute: 0),
+                    endTimeLabel: 'Ends 20:40',
                   ),
                 ],
+                onAutoArrange: () {},
+                onSave: () {},
               ),
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -144,131 +144,7 @@ bool _matchesFilter(_Priority p, _PriorityFilter f) {
 
 /* --------------------------- UI building blocks -------------------------- */
 
-class _Sidebar extends StatelessWidget {
-  const _Sidebar();
 
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 74,
-      color: const Color(0xFF0F2E5A),
-      child: Column(
-        children: [
-          const SizedBox(height: 14),
-          _SideIcon(icon: Icons.menu, selected: false),
-          const SizedBox(height: 16),
-          const Text(
-            'NEUROMATHIX',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: Colors.white70,
-              fontSize: 9,
-              letterSpacing: 1.1,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 18),
-          const Divider(color: Colors.white12, height: 1),
-          const SizedBox(height: 10),
-          _SideIcon(icon: Icons.grid_view_rounded, selected: false),
-          _SideIcon(icon: Icons.download_rounded, selected: false),
-          _SideIcon(icon: Icons.bookmark_outline_rounded, selected: false),
-          _SideIcon(icon: Icons.bar_chart_rounded, selected: false),
-          _SideIcon(icon: Icons.calendar_month_rounded, selected: true),
-          const Spacer(),
-          _SideIcon(icon: Icons.show_chart_rounded, selected: false),
-          _SideIcon(icon: Icons.settings_rounded, selected: false),
-          const SizedBox(height: 12),
-        ],
-      ),
-    );
-  }
-}
-
-class _SideIcon extends StatelessWidget {
-  final IconData icon;
-  final bool selected;
-
-  const _SideIcon({required this.icon, required this.selected});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 6),
-      width: 44,
-      height: 44,
-      decoration: BoxDecoration(
-        color: selected ? const Color(0xFF163B73) : Colors.transparent,
-        borderRadius: BorderRadius.circular(12),
-        border: selected ? Border.all(color: Colors.white12) : null,
-      ),
-      child: Icon(icon, color: Colors.white, size: 22),
-    );
-  }
-}
-
-class _TopBar extends StatelessWidget {
-  final String userName;
-  final int notificationCount;
-  final VoidCallback onMenu;
-
-  const _TopBar({
-    required this.userName,
-    required this.notificationCount,
-    required this.onMenu,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 56,
-      padding: const EdgeInsets.symmetric(horizontal: 18),
-      color: Colors.white,
-      child: Row(
-        children: [
-          Text(
-            'Hi,$userName',
-            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-          ),
-          const Spacer(),
-          Stack(
-            clipBehavior: Clip.none,
-            children: [
-              IconButton(
-                onPressed: () {},
-                icon: const Icon(Icons.notifications_none_rounded),
-              ),
-              if (notificationCount > 0)
-                Positioned(
-                  right: 10,
-                  top: 10,
-                  child: Container(
-                    width: 16,
-                    height: 16,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: Colors.redAccent,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Text(
-                      '$notificationCount',
-                      style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(width: 4),
-          const CircleAvatar(
-            radius: 14,
-            backgroundColor: Color(0xFF0F2E5A),
-            child: Text('C', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
-          )
-        ],
-      ),
-    );
-  }
-}
 
 class _PageHeader extends StatelessWidget {
   const _PageHeader();
@@ -1033,7 +909,7 @@ class _CardShell extends StatelessWidget {
                 ],
               ),
               const Spacer(),
-              if (trailing != null) trailing!,
+              ?trailing,
             ],
           ),
           const SizedBox(height: 12),

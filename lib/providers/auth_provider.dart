@@ -53,22 +53,22 @@ class AppAuthProvider extends ChangeNotifier {
     await _auth.logout();
   }
 
-String getFirebaseErrorMessage(FirebaseAuthException e) {
-  switch (e.code) {
-    case 'user-not-found':
-      return "No account found with this email.";
-    case 'wrong-password':
-      return "Incorrect password. Try again.";
-    case 'email-already-in-use':
-      return "This email is already registered.";
-    case 'invalid-email':
-      return "Enter a valid email address.";
-    case 'weak-password':
-      return "Password must be at least 6 characters.";
-    case 'network-request-failed':
-      return "Check your internet connection.";
-    default:
-      return "Something went wrong. Please try again.";
+  String getFirebaseErrorMessage(FirebaseAuthException e) {
+    switch (e.code) {
+      case 'user-not-found':
+        return "No account found with this email.";
+      case 'wrong-password':
+        return "Incorrect password. Try again.";
+      case 'email-already-in-use':
+        return "This email is already registered.";
+      case 'invalid-email':
+        return "Enter a valid email address.";
+      case 'weak-password':
+        return "Password must be at least 6 characters.";
+      case 'network-request-failed':
+        return "Check your internet connection.";
+      default:
+        return "Something went wrong. Please try again.";
+    }
   }
-}
 }

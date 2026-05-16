@@ -24,9 +24,9 @@ class LoginPage extends StatelessWidget {
       if (!context.mounted) return;
 
       if (provider.errorMessage != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(provider.errorMessage!)),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(provider.errorMessage!)));
       }
       // ❗ No navigation needed (AuthGate handles it)
     }

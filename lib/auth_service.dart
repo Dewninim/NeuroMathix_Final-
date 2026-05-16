@@ -13,10 +13,7 @@ class AuthService {
 
   // LOGIN
   Future<void> login(String email, String password) async {
-    await _auth.signInWithEmailAndPassword(
-      email: email,
-      password: password,
-    );
+    await _auth.signInWithEmailAndPassword(email: email, password: password);
   }
 
   // LOGOUT
