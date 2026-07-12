@@ -1,0 +1,13 @@
+# Secrets — never commit
+backend/.env
+
+# Flutter
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+
+# Python
+backend/venv/
+backend/__pycache__/
