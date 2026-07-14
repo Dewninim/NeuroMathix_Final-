@@ -82,7 +82,7 @@ class MyApp extends StatelessWidget {
               activeSection: StudentNavSection.reviewSchedule,
               child: ReviewSchedulePage(),
             ),
-        '/analytics': (_) => const AnalyticsPage(),
+        '/analytics': (_) => _AnalyticsRoute(),
         '/profile': (_) => const ProfilePage(),
       },
     );
@@ -180,6 +180,16 @@ class _StudentDashboardRoute extends StatelessWidget {
   Widget build(BuildContext context) {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? 'student-demo';
     return StudentDashboardPage(studentId: uid);
+  }
+}
+
+/// Route widget for '/analytics' — reads UID from current auth session,
+/// same pattern as _StudentDashboardRoute.
+class _AnalyticsRoute extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? 'student-demo';
+    return AnalyticsPage(studentId: uid);
   }
 }
 

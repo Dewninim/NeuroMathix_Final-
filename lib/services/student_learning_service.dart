@@ -114,6 +114,51 @@ class MockStudentLearningService implements StudentLearningService {
           tone: 'purple',
         ),
       ],
+      overallMasteryPercent: 73,
+      problemsSolved: 156,
+      studyTimeHours: 23,
+      masteryProgressTrend: const [
+        RetentionPoint(label: 'Week 1', retentionPercent: 35),
+        RetentionPoint(label: 'Week 2', retentionPercent: 40),
+        RetentionPoint(label: 'Week 3', retentionPercent: 38),
+        RetentionPoint(label: 'Week 4', retentionPercent: 48),
+        RetentionPoint(label: 'Week 5', retentionPercent: 52),
+        RetentionPoint(label: 'Week 6', retentionPercent: 58),
+        RetentionPoint(label: 'Week 7', retentionPercent: 65),
+        RetentionPoint(label: 'Week 8', retentionPercent: 72),
+      ],
+      topicMastery: const [
+        TopicMastery(
+          topic: 'Linear Algebra',
+          masteryPercent: 85,
+          trend: 'Improving',
+        ),
+        TopicMastery(
+          topic: 'Calculus',
+          masteryPercent: 72,
+          trend: 'Improving',
+        ),
+        TopicMastery(
+          topic: 'Differential Eq.',
+          masteryPercent: 68,
+          trend: 'Stable',
+        ),
+        TopicMastery(
+          topic: 'Statistics',
+          masteryPercent: 55,
+          trend: 'Declining',
+        ),
+        TopicMastery(
+          topic: 'Integration',
+          masteryPercent: 45,
+          trend: 'Improving',
+        ),
+        TopicMastery(
+          topic: 'Matrix Theory',
+          masteryPercent: 38,
+          trend: 'Declining',
+        ),
+      ],
     );
   }
 
@@ -460,4 +505,3 @@ class FirestoreStudentLearningService implements StudentLearningService {
     }
   }
 }
-

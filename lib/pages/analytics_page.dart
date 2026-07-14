@@ -1,19 +1,61 @@
 // Analytics Page - Tharuka Karunarathne
 import 'package:flutter/material.dart';
 import '../models/student_learning_models.dart';
+import '../services/student_learning_service.dart';
 import '../widgets/student_app_shell.dart';
 
-class AnalyticsPage extends StatelessWidget {
-  const AnalyticsPage({super.key});
+class AnalyticsPage extends StatefulWidget {
+  final String studentId;
+  final StudentLearningService? service;
+
+  const AnalyticsPage({super.key, required this.studentId, this.service});
+
+  @override
+  State<AnalyticsPage> createState() => _AnalyticsPageState();
+}
+
+class _AnalyticsPageState extends State<AnalyticsPage> {
+  late final StudentLearningService _service;
+  late final Future<StudentDashboardData> _dashboardFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _service = widget.service ?? FirestoreStudentLearningService();
+    _dashboardFuture = _service.getDashboard(widget.studentId);
+  }
 
   @override
   Widget build(BuildContext context) {
-    return StudentAppShell(
-      activeSection: StudentNavSection.analytics,
-      userName: currentAuthUserName(),
-      notificationCount: 0,
-      onSectionSelected: (section) => _openSection(context, section),
-      child: const _AnalyticsContent(),
+    return FutureBuilder<StudentDashboardData>(
+      future: _dashboardFuture,
+      builder: (context, snapshot) {
+        final data = snapshot.data;
+        final hasError = snapshot.connectionState == ConnectionState.done &&
+            snapshot.hasError;
+
+        return StudentAppShell(
+          activeSection: StudentNavSection.analytics,
+          userName: currentAuthUserName(
+            fallback: data?.displayName ?? 'Student',
+          ),
+          notificationCount: data?.notificationCount ?? 0,
+          onSectionSelected: (section) => _openSection(context, section),
+          child: hasError
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(32),
+                    child: Text(
+                      "Couldn't load your analytics right now. Please try again later.",
+                      style: TextStyle(color: Color(0xFF6B7280)),
+                    ),
+                  ),
+                )
+              : data == null
+                  ? const Center(child: CircularProgressIndicator())
+                  : _AnalyticsContent(data: data),
+        );
+      },
     );
   }
 
@@ -40,8 +82,32 @@ class AnalyticsPage extends StatelessWidget {
   }
 }
 
+/// Blue shades cycled across however many topics come back from the backend
+/// (mock data happens to have 6, but this no longer assumes a fixed count).
+const _topicBarPalette = [
+  Color(0xFF1a2f5e),
+  Color(0xFF1F4E95),
+  Color(0xFF2E86AB),
+  Color(0xFF3A9BBF),
+  Color(0xFF4DB8D4),
+  Color(0xFF6DD4E8),
+];
+
+(Color, Color) _trendColors(String trend) {
+  switch (trend) {
+    case 'Improving':
+      return (const Color(0xFF16A34A), const Color(0xFFDCFCE7));
+    case 'Declining':
+      return (const Color(0xFFDC2626), const Color(0xFFFEE2E2));
+    default:
+      return (const Color(0xFF374151), const Color(0xFFF3F4F6));
+  }
+}
+
 class _AnalyticsContent extends StatelessWidget {
-  const _AnalyticsContent();
+  final StudentDashboardData data;
+
+  const _AnalyticsContent({required this.data});
 
   @override
   Widget build(BuildContext context) {
@@ -69,13 +135,29 @@ class _AnalyticsContent extends StatelessWidget {
           // ── Stat cards row ──
           Row(
             children: [
-              _statCard(Icons.trending_up_rounded, '73%', 'Overall Mastery'),
+              _statCard(
+                Icons.trending_up_rounded,
+                '${data.overallMasteryPercent}%',
+                'Overall Mastery',
+              ),
               const SizedBox(width: 16),
-              _statCard(Icons.adjust_rounded, '156', 'Problems Solved'),
+              _statCard(
+                Icons.adjust_rounded,
+                '${data.problemsSolved}',
+                'Problems Solved',
+              ),
               const SizedBox(width: 16),
-              _statCard(Icons.access_time_rounded, '23h', 'Study Time'),
+              _statCard(
+                Icons.access_time_rounded,
+                '${data.studyTimeHours.round()}h',
+                'Study Time',
+              ),
               const SizedBox(width: 16),
-              _statCard(Icons.calendar_today_rounded, '7', 'Day Streak'),
+              _statCard(
+                Icons.calendar_today_rounded,
+                '${data.currentStreakDays}',
+                'Day Streak',
+              ),
             ],
           ),
           const SizedBox(height: 24),
@@ -111,25 +193,43 @@ class _AnalyticsContent extends StatelessWidget {
                       const SizedBox(height: 20),
                       SizedBox(
                         height: 200,
-                        child: CustomPaint(
-                          painter: _LineChartPainter(),
-                          size: Size.infinite,
-                        ),
+                        child: data.masteryProgressTrend.isEmpty
+                            ? const Center(
+                                child: Text(
+                                  'No progress data yet — complete a\nlearning session to see your trend.',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFF9CA3AF),
+                                  ),
+                                ),
+                              )
+                            : CustomPaint(
+                                painter: _LineChartPainter(
+                                  values: data.masteryProgressTrend
+                                      .map((p) => p.retentionPercent)
+                                      .toList(),
+                                ),
+                                size: Size.infinite,
+                              ),
                       ),
                       const SizedBox(height: 8),
                       // X-axis labels
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: List.generate(8, (i) {
-                          return Text(
-                            'Week ${i + 1}',
-                            style: const TextStyle(
-                              fontSize: 10,
-                              color: Color(0xFF9CA3AF),
-                            ),
-                          );
-                        }),
-                      ),
+                      if (data.masteryProgressTrend.isNotEmpty)
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: data.masteryProgressTrend
+                              .map(
+                                (p) => Text(
+                                  p.label,
+                                  style: const TextStyle(
+                                    fontSize: 10,
+                                    color: Color(0xFF9CA3AF),
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                        ),
                       const SizedBox(height: 8),
                       Row(
                         children: [
@@ -198,67 +298,76 @@ class _AnalyticsContent extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 8),
-                      ...[
-                        ('Linear Algebra', 85, const Color(0xFF1a2f5e)),
-                        ('Calculus', 72, const Color(0xFF1F4E95)),
-                        ('Differential Eq.', 68, const Color(0xFF2E86AB)),
-                        ('Statistics', 55, const Color(0xFF3A9BBF)),
-                        ('Integration', 45, const Color(0xFF4DB8D4)),
-                        ('Matrix Theory', 38, const Color(0xFF6DD4E8)),
-                      ].map(
-                        (data) => Padding(
-                          padding: const EdgeInsets.only(bottom: 10),
-                          child: Row(
-                            children: [
-                              SizedBox(
-                                width: 90,
-                                child: Text(
-                                  data.$1,
-                                  style: const TextStyle(
-                                    fontSize: 11,
-                                    color: Color(0xFF374151),
-                                  ),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                              Expanded(
-                                child: Stack(
-                                  children: [
-                                    Container(
-                                      height: 20,
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFF3F4F6),
-                                        borderRadius: BorderRadius.circular(4),
-                                      ),
+                      if (data.topicMastery.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 24),
+                          child: Text(
+                            'No topic data yet.',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF9CA3AF),
+                            ),
+                          ),
+                        )
+                      else
+                        ...List.generate(data.topicMastery.length, (i) {
+                          final topic = data.topicMastery[i];
+                          final barColor =
+                              _topicBarPalette[i % _topicBarPalette.length];
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 10),
+                            child: Row(
+                              children: [
+                                SizedBox(
+                                  width: 90,
+                                  child: Text(
+                                    topic.topic,
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      color: Color(0xFF374151),
                                     ),
-                                    FractionallySizedBox(
-                                      widthFactor: data.$2 / 100,
-                                      child: Container(
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                Expanded(
+                                  child: Stack(
+                                    children: [
+                                      Container(
                                         height: 20,
                                         decoration: BoxDecoration(
-                                          color: data.$3,
-                                          borderRadius: BorderRadius.circular(
-                                            4,
+                                          color: const Color(0xFFF3F4F6),
+                                          borderRadius:
+                                              BorderRadius.circular(4),
+                                        ),
+                                      ),
+                                      FractionallySizedBox(
+                                        widthFactor:
+                                            topic.masteryPercent / 100,
+                                        child: Container(
+                                          height: 20,
+                                          decoration: BoxDecoration(
+                                            color: barColor,
+                                            borderRadius:
+                                                BorderRadius.circular(4),
                                           ),
                                         ),
                                       ),
-                                    ),
-                                  ],
+                                    ],
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                '${data.$2}',
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                  color: Color(0xFF374151),
+                                const SizedBox(width: 8),
+                                Text(
+                                  '${topic.masteryPercent}',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF374151),
+                                  ),
                                 ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
+                              ],
+                            ),
+                          );
+                        }),
                       const SizedBox(height: 4),
                       Row(
                         children: [
@@ -285,9 +394,9 @@ class _AnalyticsContent extends StatelessWidget {
           ),
           const SizedBox(height: 24),
 
-          // ── AI Insights section (mislabeled as "Mastery Progress" in design) ──
+          // ── AI Insights section ──
           const Text(
-            'Mastery Progress Over Time',
+            'Insights',
             style: TextStyle(
               fontSize: 18,
               fontWeight: FontWeight.w700,
@@ -296,46 +405,10 @@ class _AnalyticsContent extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           Row(
-            children: [
-              // Linear Algebra Improving
-              Expanded(
-                child: _insightCard(
-                  color: const Color(0xFFF0FDF4),
-                  borderColor: const Color(0xFF86EFAC),
-                  icon: Icons.trending_up_rounded,
-                  iconColor: const Color(0xFF16A34A),
-                  title: 'Linear Algebra Improving',
-                  body:
-                      'Your mastery increased by 15% this week. Keep practicing eigenvalue problems!',
-                ),
-              ),
-              const SizedBox(width: 16),
-              // Matrix Theory Needs Attention
-              Expanded(
-                child: _insightCard(
-                  color: const Color(0xFFFFF7ED),
-                  borderColor: const Color(0xFFFDBA74),
-                  icon: Icons.adjust_rounded,
-                  iconColor: const Color(0xFFEA580C),
-                  title: 'Matrix Theory Needs Attention',
-                  body:
-                      'Performance declining over the last 3 sessions. Recommend focused review.',
-                ),
-              ),
-              const SizedBox(width: 16),
-              // Streak Achievement
-              Expanded(
-                child: _insightCard(
-                  color: const Color(0xFFF0FDF4),
-                  borderColor: const Color(0xFF86EFAC),
-                  icon: Icons.emoji_events_outlined,
-                  iconColor: const Color(0xFF16A34A),
-                  title: 'Streak Achievement',
-                  body:
-                      "You've maintained a 7-day study streak! Consistency is key to retention.",
-                ),
-              ),
-            ],
+            children: _buildInsightCards(this)
+                .expand((w) => [Expanded(child: w), const SizedBox(width: 16)])
+                .toList()
+              ..removeLast(),
           ),
           const SizedBox(height: 28),
 
@@ -349,126 +422,162 @@ class _AnalyticsContent extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
-          ...[
-            (
-              'Linear Algebra',
-              85,
-              'Improving',
-              const Color(0xFF16A34A),
-              const Color(0xFFDCFCE7),
-            ),
-            (
-              'Calculus',
-              72,
-              'Improving',
-              const Color(0xFF16A34A),
-              const Color(0xFFDCFCE7),
-            ),
-            (
-              'Differential Eq.',
-              68,
-              'Stable',
-              const Color(0xFF374151),
-              const Color(0xFFF3F4F6),
-            ),
-            (
-              'Statistics',
-              55,
-              'Declining',
-              const Color(0xFFDC2626),
-              const Color(0xFFFEE2E2),
-            ),
-            (
-              'Integration',
-              45,
-              'Improving',
-              const Color(0xFF16A34A),
-              const Color(0xFFDCFCE7),
-            ),
-            (
-              'Matrix Theory',
-              38,
-              'Declining',
-              const Color(0xFFDC2626),
-              const Color(0xFFFEE2E2),
-            ),
-          ].map(
-            (d) => Padding(
-              padding: const EdgeInsets.only(bottom: 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    d.$1,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
-                      color: Color(0xFF111827),
+          if (data.topicMastery.isEmpty)
+            const Text(
+              'Complete a learning session to see a per-topic breakdown here.',
+              style: TextStyle(fontSize: 13, color: Color(0xFF6B7280)),
+            )
+          else
+            ...data.topicMastery.map((topic) {
+              final (textColor, bgColor) = _trendColors(topic.trend);
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      topic.topic,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                        color: Color(0xFF111827),
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Stack(
-                          children: [
-                            Container(
-                              height: 10,
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFF3F4F6),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                            ),
-                            FractionallySizedBox(
-                              widthFactor: d.$2 / 100,
-                              child: Container(
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Stack(
+                            children: [
+                              Container(
                                 height: 10,
                                 decoration: BoxDecoration(
-                                  color: const Color(0xFF1F4E95),
+                                  color: const Color(0xFFF3F4F6),
                                   borderRadius: BorderRadius.circular(6),
                                 ),
                               ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Text(
-                        '${d.$2}',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 14,
-                          color: Color(0xFF111827),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
-                          color: d.$5,
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Text(
-                          d.$3,
-                          style: TextStyle(
-                            color: d.$4,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
+                              FractionallySizedBox(
+                                widthFactor: topic.masteryPercent / 100,
+                                child: Container(
+                                  height: 10,
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF1F4E95),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
+                        const SizedBox(width: 12),
+                        Text(
+                          '${topic.masteryPercent}',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 14,
+                            color: Color(0xFF111827),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: bgColor,
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Text(
+                            topic.trend,
+                            style: TextStyle(
+                              color: textColor,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              );
+            }),
         ],
       ),
     );
+  }
+
+  /// Derives up to 3 human-readable insight cards straight from the topic
+  /// mastery + streak data — nothing here is hardcoded copy anymore.
+  List<Widget> _buildInsightCards(_AnalyticsContent content) {
+    final topics = content.data.topicMastery;
+    final improving = topics.where((t) => t.trend == 'Improving').toList()
+      ..sort((a, b) => b.masteryPercent.compareTo(a.masteryPercent));
+    final declining = topics.where((t) => t.trend == 'Declining').toList()
+      ..sort((a, b) => a.masteryPercent.compareTo(b.masteryPercent));
+
+    final cards = <Widget>[];
+
+    if (improving.isNotEmpty) {
+      final t = improving.first;
+      cards.add(
+        _insightCard(
+          color: const Color(0xFFF0FDF4),
+          borderColor: const Color(0xFF86EFAC),
+          icon: Icons.trending_up_rounded,
+          iconColor: const Color(0xFF16A34A),
+          title: '${t.topic} Improving',
+          body:
+              'Your mastery in ${t.topic} is trending up — now at ${t.masteryPercent}%. Keep it going!',
+        ),
+      );
+    }
+
+    if (declining.isNotEmpty) {
+      final t = declining.first;
+      cards.add(
+        _insightCard(
+          color: const Color(0xFFFFF7ED),
+          borderColor: const Color(0xFFFDBA74),
+          icon: Icons.adjust_rounded,
+          iconColor: const Color(0xFFEA580C),
+          title: '${t.topic} Needs Attention',
+          body:
+              '${t.topic} has dropped to ${t.masteryPercent}% mastery. A focused review session should help.',
+        ),
+      );
+    }
+
+    if (content.data.currentStreakDays > 0) {
+      cards.add(
+        _insightCard(
+          color: const Color(0xFFF0FDF4),
+          borderColor: const Color(0xFF86EFAC),
+          icon: Icons.emoji_events_outlined,
+          iconColor: const Color(0xFF16A34A),
+          title: 'Streak Achievement',
+          body:
+              "You've maintained a ${content.data.currentStreakDays}-day study streak! Consistency is key to retention.",
+        ),
+      );
+    }
+
+    if (cards.isEmpty) {
+      cards.add(
+        _insightCard(
+          color: const Color(0xFFF3F4F6),
+          borderColor: const Color(0xFFE5E7EB),
+          icon: Icons.insights_outlined,
+          iconColor: const Color(0xFF6B7280),
+          title: 'Not enough data yet',
+          body:
+              'Complete a few learning sessions and check back — your personalised insights will show up here.',
+        ),
+      );
+    }
+
+    return cards;
   }
 
   Widget _statCard(IconData icon, String value, String label) {
@@ -573,9 +682,13 @@ class _AnalyticsContent extends StatelessWidget {
 
 // ── Simple line chart painter ──
 class _LineChartPainter extends CustomPainter {
+  final List<double> values;
+
+  _LineChartPainter({required this.values});
+
   @override
   void paint(Canvas canvas, Size size) {
-    final data = [35.0, 40.0, 38.0, 48.0, 52.0, 58.0, 65.0, 72.0];
+    final data = values;
     final maxVal = 100.0;
     final minVal = 0.0;
     final range = maxVal - minVal;
@@ -596,6 +709,11 @@ class _LineChartPainter extends CustomPainter {
         textDirection: TextDirection.ltr,
       )..layout();
       tp.paint(canvas, Offset(-32, y - 6));
+    }
+
+    if (data.length < 2) {
+      // Not enough points to draw a line — just leave the grid.
+      return;
     }
 
     final points = <Offset>[];
@@ -658,5 +776,6 @@ class _LineChartPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant _LineChartPainter oldDelegate) =>
+      oldDelegate.values != values;
 }

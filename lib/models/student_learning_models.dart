@@ -177,6 +177,30 @@ class ProgressStat {
   }
 }
 
+class TopicMastery {
+  final String topic;
+  final int masteryPercent;
+  final String trend; // 'Improving' | 'Stable' | 'Declining'
+
+  const TopicMastery({
+    required this.topic,
+    required this.masteryPercent,
+    required this.trend,
+  });
+
+  factory TopicMastery.fromJson(Map<String, dynamic> json) {
+    return TopicMastery(
+      topic: json['topic'] as String,
+      masteryPercent: json['masteryPercent'] as int,
+      trend: json['trend'] as String? ?? 'Stable',
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {'topic': topic, 'masteryPercent': masteryPercent, 'trend': trend};
+  }
+}
+
 class StudentDashboardData {
   final String studentId;
   final String displayName;
@@ -189,6 +213,11 @@ class StudentDashboardData {
   final List<RecommendedConcept> recommendedConcepts;
   final QuizPrompt quickCheck;
   final List<ProgressStat> progressStats;
+  final int overallMasteryPercent;
+  final int problemsSolved;
+  final double studyTimeHours;
+  final List<RetentionPoint> masteryProgressTrend;
+  final List<TopicMastery> topicMastery;
 
   const StudentDashboardData({
     required this.studentId,
@@ -202,6 +231,11 @@ class StudentDashboardData {
     required this.recommendedConcepts,
     required this.quickCheck,
     required this.progressStats,
+    this.overallMasteryPercent = 0,
+    this.problemsSolved = 0,
+    this.studyTimeHours = 0,
+    this.masteryProgressTrend = const [],
+    this.topicMastery = const [],
   });
 
   factory StudentDashboardData.fromJson(Map<String, dynamic> json) {
@@ -231,6 +265,23 @@ class StudentDashboardData {
       progressStats: (json['progressStats'] as List<dynamic>)
           .map((item) => ProgressStat.fromJson(item as Map<String, dynamic>))
           .toList(),
+      // Newer analytics fields — default gracefully so existing Firestore
+      // docs (seeded before these existed) don't crash the app.
+      overallMasteryPercent: json['overallMasteryPercent'] as int? ?? 0,
+      problemsSolved: json['problemsSolved'] as int? ?? 0,
+      studyTimeHours: (json['studyTimeHours'] as num?)?.toDouble() ?? 0,
+      masteryProgressTrend: (json['masteryProgressTrend'] as List<dynamic>?)
+              ?.map(
+                (item) => RetentionPoint.fromJson(item as Map<String, dynamic>),
+              )
+              .toList() ??
+          const [],
+      topicMastery: (json['topicMastery'] as List<dynamic>?)
+              ?.map(
+                (item) => TopicMastery.fromJson(item as Map<String, dynamic>),
+              )
+              .toList() ??
+          const [],
     );
   }
 
@@ -249,6 +300,13 @@ class StudentDashboardData {
           .toList(),
       'quickCheck': quickCheck.toJson(),
       'progressStats': progressStats.map((item) => item.toJson()).toList(),
+      'overallMasteryPercent': overallMasteryPercent,
+      'problemsSolved': problemsSolved,
+      'studyTimeHours': studyTimeHours,
+      'masteryProgressTrend': masteryProgressTrend
+          .map((item) => item.toJson())
+          .toList(),
+      'topicMastery': topicMastery.map((item) => item.toJson()).toList(),
     };
   }
 }
