@@ -1,0 +1,21 @@
+# Secrets — never commit
+backend/.env
+
+# Flutter
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+
+# Python
+backend/venv/
+backend/__pycache__/
+# Firebase Admin credentials and Cloud Functions
+admin_tools/.venv/
+admin_tools/*.json
+**/*service-account*.json
+functions/node_modules/
+functions/lib/
+.firebase/
+

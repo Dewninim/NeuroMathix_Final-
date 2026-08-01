@@ -1,0 +1,37 @@
+name: neuromathix
+description: "NeuroMathix – AI-powered math learning platform."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  # Firebase
+  firebase_core: ^4.9.0
+  firebase_auth: ^6.4.0
+  cloud_firestore: ^6.3.0
+  # State management
+  provider: ^6.1.5+1
+  flutter_riverpod: ^2.5.1
+  # Networking (talks to the Flask backend in /backend)
+  http: ^1.2.2
+  # UI / utilities
+  google_fonts: ^6.1.0
+  table_calendar: ^3.1.2
+  intl: ^0.19.0
+  video_player: ^2.9.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/videos/hero-video.mp4
+    - assets/images/bg2.jpg
