@@ -252,30 +252,61 @@ def extract_chunks(pdf_bytes,wpc=300,max_chunks=40):
 
 def _is_frontmatter_like(text):
     """Detects preface / motivation / acknowledgments / dedication /
-    about-the-author prose. This is real content, but NOT mathematical
-    instructional content — it should never become a question source.
+    about-the-author prose, contest/promo blurbs, and other non-math
+    front-matter. This is real content, but NOT mathematical instructional
+    content — it should never become a question source.
 
     Split into two tiers after a real failure: a sentence containing the
     literal word "preface" and a website domain (".org") was still getting
     through because a single stray "/" (from "AMC 10/12") pushed the old
-    single-threshold math-density check just over the cutoff (0.0345 vs
-    0.03), silently overriding an otherwise-unambiguous keyword match.
-    STRONG markers — no legitimate math-instructional sentence organically
-    contains these — flag unconditionally, regardless of incidental
-    math-looking punctuation. WEAK markers remain gated by density, since
-    those phrases could in principle appear in real explanatory prose."""
+    single-threshold math-density check just over the cutoff. STRONG
+    markers — no legitimate math-instructional sentence organically
+    contains these — flag unconditionally. WEAK markers remain gated by
+    density, since those phrases could in principle appear in real prose.
+
+    v3 fix: ".org"/".com"/"www." were promoted to unconditional strong
+    markers to catch a scraped course-marketing page — but in real testing
+    this caused EVERY chunk in a document to be rejected (0/63 kept),
+    because the source PDF has "OmegaLearn.org" printed as a running page
+    footer/watermark on every page. A domain mention alone says nothing
+    about whether the surrounding content is real math or not — it only
+    becomes real evidence of junk when it's clearly part of marketing
+    prose (a full phrase like "visit us at X.org" or "OmegaLearn.org
+    Preface"), not a bare watermark fragment. Domains are now WEAK
+    (density-gated) evidence, same as the other phrases that could
+    legitimately appear incidentally."""
     tl=text.lower()
     strong=["preface","acknowledg","dedicat","foreword","copyright","all rights reserved",
-        ".org",".com","www.","about the author","table of contents"]
+        "about the author","table of contents","list of topics",
+        "raffle","giveaway","prize","enter to win","win a","brilliant premium",
+        "sign up","register now","subscribe","newsletter","free trial"]
     if any(kw in tl for kw in strong):
         return True
     weak=["motivation","about this book","this book was","we hope you","our passion",
-        "thank you for","special thanks"]
+        "thank you for","special thanks",".org",".com","www."]
     if not any(kw in tl for kw in weak):
         return False
     math_signals=len(re.findall(r"[=+\-*/^]|\d+\.\d+|\\frac|\\int|\\sum|\bsolve\b|\bequation\b|\bformula\b",text,re.IGNORECASE))
     word_count=max(len(text.split()),1)
     return (math_signals/word_count)<0.05
+
+def _has_real_math_evidence(text):
+    """The actual structural fix, not another blacklist entry. Instead of
+    trying to enumerate every possible non-math phrasing a scraped/
+    promotional PDF might contain (provably unwinnable — three unrelated
+    junk phrasings have already been found: book preface, course-marketing
+    webpage, contest raffle), this requires POSITIVE proof of genuine
+    mathematical working before a chunk is allowed as a question source at
+    all. A chunk with no numeric computation, no formula, no equation-like
+    pattern anywhere in it is not math content, regardless of what words it
+    does or doesn't contain."""
+    real_math_signals=len(re.findall(
+        r"\d\s*[=+\-*/^]\s*-?\d|=\s*-?\d+(\.\d+)?|\\frac|\\int|\\sum|\\sqrt|"
+        r"\d+\s*[a-zA-Z]\^?\d*|\btheorem\b|\bproof\b|\bsolve\b.{0,40}=|"
+        r"\bformula\b.{0,30}=|\bequation\b.{0,30}=",
+        text))
+    word_count=max(len(text.split()),1)
+    return(real_math_signals/word_count)>=0.008
 
 def _is_toc_like(text):
     """Detects table-of-contents / index / 'answers to exercises' listing
@@ -541,7 +572,7 @@ Return ONLY: {{"xai_text":"...","confidence_boost":0.1-1.0,"review_topics":["t1"
 
 def call_gemini(sys_p,usr_p,max_tokens=8192):
     global GEMINI_WORKS,_GEMINI_COOLDOWN_UNTIL
-    import time as _time
+    import time as _time,socket
     if _time.time()<_GEMINI_COOLDOWN_UNTIL:
         # Still within a rate-limit cooldown — fail fast instead of making
         # a network round-trip that's guaranteed to 429 again, and instead
@@ -552,11 +583,21 @@ def call_gemini(sys_p,usr_p,max_tokens=8192):
     # hard-error on them, so they're intentionally omitted here.
     payload=json.dumps({"system_instruction":{"parts":[{"text":sys_p}]},"contents":[{"parts":[{"text":usr_p}]}],"generationConfig":{"maxOutputTokens":max_tokens}}).encode()
     req=urllib.request.Request(GEMINI_URL,data=payload,headers={"Content-Type":"application/json"},method="POST")
+    # A fixed 90s timeout was too short once max_tokens got bumped to 16000
+    # for the richer batched prompts (cognitive_level + selection_rationale
+    # + full XAI for up to 15 questions in one call) — real testing showed
+    # Gemini was genuinely generating good content, just taking longer than
+    # 90s to finish it, so the connection got killed mid-response and every
+    # such call failed with "the read operation timed out" or a truncated-
+    # JSON parse error. Scales with the requested output size instead.
+    net_timeout=min(240,max(90,max_tokens//60))
     try:
-        with urllib.request.urlopen(req,timeout=90) as r:
+        with urllib.request.urlopen(req,timeout=net_timeout) as r:
             data=json.loads(r.read())
         GEMINI_WORKS=True
         return data["candidates"][0]["content"]["parts"][0]["text"]
+    except (socket.timeout,TimeoutError):
+        raise RuntimeError(f"gemini_timeout: no response within {net_timeout}s (max_tokens={max_tokens})")
     except urllib.error.HTTPError as e:
         body=e.read().decode()
         if e.code==403:GEMINI_WORKS=False;raise RuntimeError(f"gemini_403: {body[:400]}")

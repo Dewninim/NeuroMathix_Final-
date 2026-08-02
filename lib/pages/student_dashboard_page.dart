@@ -340,7 +340,7 @@ class _NextReviewRowState extends State<_NextReviewRow> {
     try {
       final r = await http
           .post(Uri.parse('$kApiBaseUrl/material/${widget.review.materialId}/session/start'))
-          .timeout(const Duration(seconds: 120));
+          .timeout(const Duration(seconds: 260));
       if (r.statusCode != 200) throw Exception('Could not start session (${r.statusCode})');
       final data = jsonDecode(r.body) as Map<String, dynamic>;
       final sessionId = data['session_id'] as String?;

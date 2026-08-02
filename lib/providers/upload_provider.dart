@@ -119,7 +119,7 @@ class UploadProvider extends ChangeNotifier {
       // take longer than 60s, especially the first request in a session.
       final sessionResp = await http
           .post(Uri.parse('$kApiBaseUrl/material/$materialId/session/start'))
-          .timeout(const Duration(seconds: 120));
+          .timeout(const Duration(seconds: 260));
 
       if (sessionResp.statusCode != 200) {
         final body = _tryDecode(sessionResp.body);
