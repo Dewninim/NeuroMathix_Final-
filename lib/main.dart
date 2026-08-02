@@ -21,6 +21,7 @@ import 'services/student_learning_service.dart';
 import 'widgets/logo_popup.dart';
 import 'widgets/student_app_shell.dart';
 import 'pages/upload_material_page.dart';
+import 'theme/app_theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -48,9 +49,7 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'NeuroMathix',
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1F4E95)),
+      theme: AppTheme.light().copyWith(
         pageTransitionsTheme: const PageTransitionsTheme(
           builders: {
             TargetPlatform.android: _NoPageTransitionBuilder(),
@@ -248,14 +247,11 @@ class _PlaceholderPage extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.construction_rounded, size: 48, color: Color(0xFF9CA3AF)),
+          const Icon(Icons.construction_rounded, size: 48, color: AppColors.textFaint),
           const SizedBox(height: 16),
-          Text(title,
-              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800,
-                  color: Color(0xFF111827))),
+          Text(title, style: AppText.h1),
           const SizedBox(height: 8),
-          Text(subtitle,
-              style: const TextStyle(color: Color(0xFF6B7280), fontSize: 14)),
+          Text(subtitle, style: AppText.bodySmall),
         ],
       ),
     );

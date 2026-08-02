@@ -1,5 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import '../models/teacher_models.dart';
 import '../widgets/overlay_dropdown.dart';
@@ -119,9 +120,9 @@ class _TeacherDashboardPageState extends State<TeacherDashboardPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
+                  Text(
                     'Teacher Dashboard',
-                    style: TextStyle(
+                    style: GoogleFonts.dmSans(
                       fontSize: 18,
                       fontWeight: FontWeight.w800,
                       color: neuromathixText,
@@ -139,9 +140,9 @@ class _TeacherDashboardPageState extends State<TeacherDashboardPage> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text(
+                        Text(
                           'Students',
-                          style: TextStyle(
+                          style: GoogleFonts.dmSans(
                             fontSize: 13,
                             fontWeight: FontWeight.w800,
                             color: neuromathixText,
@@ -314,7 +315,7 @@ class _MetricCard extends StatelessWidget {
               children: [
                 Text(
                   value,
-                  style: const TextStyle(
+                  style: GoogleFonts.dmSans(
                     fontSize: 18,
                     fontWeight: FontWeight.w800,
                     height: 1.1,
@@ -323,7 +324,7 @@ class _MetricCard extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   label,
-                  style: TextStyle(
+                  style: GoogleFonts.dmSans(
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
                     color: accentColor.withOpacity(0.9),
@@ -371,14 +372,14 @@ class _StudentRow extends StatelessWidget {
               children: [
                 Text(
                   student.name,
-                  style: const TextStyle(
+                  style: GoogleFonts.dmSans(
                     fontSize: 12,
                     fontWeight: FontWeight.w800,
                   ),
                 ),
                 Text(
                   student.lastActiveLabel,
-                  style: const TextStyle(
+                  style: GoogleFonts.dmSans(
                     fontSize: 10.5,
                     color: neuromathixMuted,
                   ),
@@ -390,7 +391,7 @@ class _StudentRow extends StatelessWidget {
           Expanded(
             child: Text(
               student.focusTitle,
-              style: const TextStyle(
+              style: GoogleFonts.dmSans(
                 fontSize: 12,
                 fontWeight: FontWeight.w700,
               ),
@@ -427,7 +428,7 @@ class _RiskChip extends StatelessWidget {
       ),
       child: Text(
         level.label,
-        style: const TextStyle(
+        style: GoogleFonts.dmSans(
           fontSize: 11,
           fontWeight: FontWeight.w700,
         ),
@@ -490,7 +491,7 @@ class _LabeledControl extends StatelessWidget {
       children: [
         Text(
           label,
-          style: const TextStyle(
+          style: GoogleFonts.dmSans(
             fontSize: 13,
             fontWeight: FontWeight.w800,
             color: neuromathixText,
@@ -522,7 +523,7 @@ class _PillTextField extends StatelessWidget {
         onChanged: onChanged,
         decoration: InputDecoration(
           hintText: hintText,
-          hintStyle: const TextStyle(
+          hintStyle: GoogleFonts.dmSans(
             fontSize: 11,
             color: neuromathixMuted,
             fontWeight: FontWeight.w600,
@@ -565,7 +566,7 @@ class _PillSelect extends StatelessWidget {
             child: Text(
               label,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
+              style: GoogleFonts.dmSans(
                 fontSize: 11,
                 fontWeight: FontWeight.w700,
                 color: neuromathixText,

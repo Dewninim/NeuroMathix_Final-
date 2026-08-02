@@ -1,9 +1,15 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:http/http.dart' as http;
 
+import '../config/api_config.dart';
 import '../models/student_learning_models.dart';
 import '../services/student_learning_service.dart';
+import '../theme/app_theme.dart';
 import '../widgets/student_app_shell.dart';
 import 'explainable_ai_feedback_page.dart';
+import 'learning_session_screen.dart';
 
 class StudentDashboardPage extends StatefulWidget {
   final String studentId;
@@ -126,11 +132,17 @@ class _DashboardContent extends StatelessWidget {
             children: [
               _DashboardHeader(streakDays: data.currentStreakDays),
               const SizedBox(height: 26),
+              // ── REAL DATA — pulled live from the Flask backend
+              // (/user/<uid>/materials), unlike everything below this line
+              // which still comes from FirestoreStudentLearningService's
+              // seeded mock data. See the note in _NextReviewsSection.
+              _NextReviewsSection(studentId: data.studentId),
+              const SizedBox(height: 26),
               _RetentionOverview(data: data),
               const SizedBox(height: 30),
-              const Text(
+              Text(
                 'Recommended Now',
-                style: TextStyle(
+                style: GoogleFonts.dmSans(
                   fontSize: 23,
                   fontWeight: FontWeight.w800,
                   color: neuromathixText,
@@ -164,6 +176,264 @@ class _DashboardContent extends StatelessWidget {
   }
 }
 
+/// ── REAL DATA SECTION ────────────────────────────────────────────────────
+/// Fetches this student's actual materials from the Flask backend
+/// (GET /user/<uid>/materials — see backend/app.py) and shows their real,
+/// forgetting-curve-computed next review dates. Everything else on this
+/// dashboard currently comes from FirestoreStudentLearningService, which
+/// falls back to seeded mock data with no connection to the real upload/
+/// session/scoring pipeline at all — this section is the one genuine bridge
+/// between "what the student actually studied" and the dashboard.
+class _NextReviewsSection extends StatefulWidget {
+  final String studentId;
+  const _NextReviewsSection({required this.studentId});
+
+  @override
+  State<_NextReviewsSection> createState() => _NextReviewsSectionState();
+}
+
+class _NextReviewsSectionState extends State<_NextReviewsSection> {
+  late Future<List<_MaterialReview>> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _fetch();
+  }
+
+  Future<List<_MaterialReview>> _fetch() async {
+    final r = await http
+        .get(Uri.parse('$kApiBaseUrl/user/${widget.studentId}/materials'))
+        .timeout(const Duration(seconds: 20));
+    if (r.statusCode != 200) throw Exception('Could not load materials (${r.statusCode})');
+    final data = jsonDecode(r.body) as Map<String, dynamic>;
+    final materials = (data['materials'] as List? ?? []).cast<Map<String, dynamic>>();
+    final reviews = materials
+        .map((m) => _MaterialReview.fromJson(m))
+        .where((m) => m.nextReviewDate != null)
+        .toList()
+      ..sort((a, b) => a.nextReviewDate!.compareTo(b.nextReviewDate!));
+    return reviews;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<_MaterialReview>>(
+      future: _future,
+      builder: (context, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const _WhiteCard(
+            child: SizedBox(height: 64, child: Center(child: CircularProgressIndicator(strokeWidth: 2))),
+          );
+        }
+        if (snap.hasError) {
+          // Backend not reachable — fail quiet, not loud. This section is
+          // additive; the rest of the (mock) dashboard still renders fine.
+          return const SizedBox.shrink();
+        }
+        final reviews = snap.data ?? [];
+        if (reviews.isEmpty) return const SizedBox.shrink();
+
+        final now = DateTime.now();
+        final overdue = reviews.where((r) => r.nextReviewDate!.isBefore(now)).toList();
+        final upcoming = reviews.where((r) => !r.nextReviewDate!.isBefore(now)).take(3).toList();
+        final dueNow = [...overdue, ...upcoming];
+
+        return _WhiteCard(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.event_available_outlined, color: AppColors.primary, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text('Your Next Reviews', style: AppText.h2)),
+                  OutlinedButton.icon(
+                    onPressed: () => Navigator.pushNamed(context, '/upload'),
+                    icon: const Icon(Icons.add, size: 16),
+                    label: Text('New Material', style: GoogleFonts.dmSans(fontSize: 12, fontWeight: FontWeight.w700)),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppColors.primary,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      side: const BorderSide(color: AppColors.border),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Timed to when you\'re about to forget each topic — right on schedule.',
+                style: AppText.bodySmall,
+              ),
+              const SizedBox(height: 14),
+              ...dueNow.map((r) => _NextReviewRow(review: r)),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _MaterialReview {
+  final String materialId;
+  final String filename;
+  final DateTime? nextReviewDate;
+  final double? score;
+  final int sessionCount;
+  final String mode;
+  final int studyDays;
+  final bool masteryReached;
+
+  _MaterialReview({
+    required this.materialId,
+    required this.filename,
+    required this.nextReviewDate,
+    required this.score,
+    required this.sessionCount,
+    required this.mode,
+    required this.studyDays,
+    required this.masteryReached,
+  });
+
+  factory _MaterialReview.fromJson(Map<String, dynamic> j) {
+    final latest = j['latest_session'] as Map<String, dynamic>?;
+    DateTime? nextReview;
+    final raw = latest?['next_review_date'] as String?;
+    if (raw != null) {
+      try {
+        nextReview = DateTime.parse(raw);
+      } catch (_) {}
+    }
+    return _MaterialReview(
+      materialId: j['material_id'] as String? ?? '',
+      filename: (j['filename'] as String? ?? 'Untitled.pdf').replaceAll('.pdf', ''),
+      nextReviewDate: nextReview,
+      score: (latest?['score'] as num?)?.toDouble(),
+      sessionCount: j['session_count'] as int? ?? 0,
+      mode: j['mode'] as String? ?? 'fixed',
+      studyDays: j['study_days'] as int? ?? 7,
+      masteryReached: latest?['mastery_reached'] as bool? ?? false,
+    );
+  }
+}
+
+class _NextReviewRow extends StatefulWidget {
+  final _MaterialReview review;
+  const _NextReviewRow({required this.review});
+
+  @override
+  State<_NextReviewRow> createState() => _NextReviewRowState();
+}
+
+class _NextReviewRowState extends State<_NextReviewRow> {
+  bool _starting = false;
+
+  // Starts a NEW session against this EXISTING material (no re-upload) and
+  // jumps straight into it — this is the "continue without going through
+  // upload again" flow.
+  Future<void> _continueSession() async {
+    if (_starting) return;
+    setState(() => _starting = true);
+    try {
+      final r = await http
+          .post(Uri.parse('$kApiBaseUrl/material/${widget.review.materialId}/session/start'))
+          .timeout(const Duration(seconds: 120));
+      if (r.statusCode != 200) throw Exception('Could not start session (${r.statusCode})');
+      final data = jsonDecode(r.body) as Map<String, dynamic>;
+      final sessionId = data['session_id'] as String?;
+      if (sessionId == null) throw Exception('No session_id returned');
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => LearningSessionScreen(
+            sessionId: sessionId,
+            studyMode: widget.review.mode,
+            studyDays: widget.review.studyDays,
+            fileName: widget.review.filename,
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not start session: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _starting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final review = widget.review;
+    final days = review.nextReviewDate!.difference(DateTime.now()).inDays;
+    final isOverdue = days < 0;
+    final label = isOverdue
+        ? 'Due now'
+        : days == 0
+            ? 'Today'
+            : 'In $days day${days == 1 ? '' : 's'}';
+    final color = isOverdue ? AppColors.error : AppColors.accent;
+    final bg = isOverdue ? AppColors.errorBg : AppColors.infoBg;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppColors.bgPage,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(child: Text(review.filename, style: AppText.bodyMedium, maxLines: 1, overflow: TextOverflow.ellipsis)),
+                    if (review.masteryReached) ...[
+                      const SizedBox(width: 6),
+                      const Icon(Icons.workspace_premium, size: 14, color: Color(0xFFF59E0B)),
+                    ],
+                  ],
+                ),
+                if (review.score != null)
+                  Text('Last score: ${(review.score! * 100).round()}%', style: AppText.caption),
+              ],
+            ),
+          ),
+          Container(
+            margin: const EdgeInsets.only(right: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
+            child: Text(label, style: GoogleFonts.dmSans(color: color, fontWeight: FontWeight.w700, fontSize: 12)),
+          ),
+          SizedBox(
+            height: 32,
+            child: ElevatedButton(
+              onPressed: _starting ? null : _continueSession,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primary,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                elevation: 0,
+              ),
+              child: _starting
+                  ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  : Text('Continue', style: GoogleFonts.dmSans(fontSize: 12, fontWeight: FontWeight.w700)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _DashboardHeader extends StatelessWidget {
   final int streakDays;
 
@@ -191,9 +461,9 @@ class _DashboardHeader extends StatelessWidget {
                   ? CrossAxisAlignment.start
                   : CrossAxisAlignment.end,
               children: [
-                const Text(
+                Text(
                   'Current Streak',
-                  style: TextStyle(
+                  style: GoogleFonts.dmSans(
                     color: neuromathixMuted,
                     fontWeight: FontWeight.w800,
                     fontSize: 15,
@@ -202,7 +472,7 @@ class _DashboardHeader extends StatelessWidget {
                 const SizedBox(height: 4),
                 Text(
                   '$streakDays Days',
-                  style: const TextStyle(
+                  style: GoogleFonts.dmSans(
                     fontSize: 22,
                     fontWeight: FontWeight.w900,
                     color: neuromathixText,
@@ -222,21 +492,21 @@ class _HeaderCopy extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Column(
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           'Dashboard',
-          style: TextStyle(
+          style: GoogleFonts.dmSans(
             fontSize: 38,
             fontWeight: FontWeight.w900,
             color: neuromathixText,
           ),
         ),
-        SizedBox(height: 8),
+        const SizedBox(height: 8),
         Text(
           'Get a glimpse of your learning journey',
-          style: TextStyle(
+          style: GoogleFonts.dmSans(
             fontSize: 24,
             fontWeight: FontWeight.w400,
             color: neuromathixText,
@@ -317,22 +587,22 @@ class _RetentionTitle extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Expanded(
+        Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
                 'Memory Retention Overview',
-                style: TextStyle(
+                style: GoogleFonts.dmSans(
                   fontSize: 20,
                   fontWeight: FontWeight.w900,
                   color: neuromathixText,
                 ),
               ),
-              SizedBox(height: 4),
+              const SizedBox(height: 4),
               Text(
                 'Real-time synaptic strength visualization',
-                style: TextStyle(
+                style: GoogleFonts.dmSans(
                   fontSize: 15,
                   color: neuromathixMuted,
                   fontWeight: FontWeight.w600,
@@ -346,7 +616,7 @@ class _RetentionTitle extends StatelessWidget {
           children: [
             Text(
               '${data.retentionPercent}%',
-              style: const TextStyle(
+              style: GoogleFonts.dmSans(
                 fontSize: 34,
                 fontWeight: FontWeight.w900,
                 color: neuromathixText,
@@ -354,8 +624,8 @@ class _RetentionTitle extends StatelessWidget {
             ),
             Text(
               data.retentionDeltaLabel,
-              style: const TextStyle(
-                color: Color(0xFF54A86F),
+              style: GoogleFonts.dmSans(
+                color: const Color(0xFF54A86F),
                 fontWeight: FontWeight.w800,
               ),
             ),
@@ -376,9 +646,9 @@ class _MetricRail extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
+        Text(
           'KEY METRICS',
-          style: TextStyle(
+          style: GoogleFonts.dmSans(
             color: neuromathixMuted,
             fontWeight: FontWeight.w900,
             letterSpacing: 1.4,
@@ -415,7 +685,7 @@ class _MetricItem extends StatelessWidget {
       children: [
         Text(
           metric.label,
-          style: const TextStyle(
+          style: GoogleFonts.dmSans(
             color: neuromathixMuted,
             fontWeight: FontWeight.w700,
           ),
@@ -427,7 +697,7 @@ class _MetricItem extends StatelessWidget {
             const SizedBox(width: 8),
             Text(
               metric.value,
-              style: const TextStyle(
+              style: GoogleFonts.dmSans(
                 fontSize: 20,
                 fontWeight: FontWeight.w900,
                 color: neuromathixText,
@@ -554,7 +824,7 @@ class _RetentionTrendPainter extends CustomPainter {
       if (points[i].label.isEmpty) continue;
       textPainter.text = TextSpan(
         text: points[i].label,
-        style: const TextStyle(
+        style: GoogleFonts.dmSans(
           color: neuromathixMuted,
           fontSize: 13,
           fontWeight: FontWeight.w900,
@@ -649,7 +919,7 @@ class _RecommendedConceptCard extends StatelessWidget {
                 children: [
                   Text(
                     concept.title,
-                    style: const TextStyle(
+                    style: GoogleFonts.dmSans(
                       fontSize: 20,
                       fontWeight: FontWeight.w900,
                       color: neuromathixText,
@@ -673,7 +943,7 @@ class _RecommendedConceptCard extends StatelessWidget {
                       Expanded(
                         child: Text(
                           concept.retentionNote,
-                          style: const TextStyle(
+                          style: GoogleFonts.dmSans(
                             color: neuromathixMuted,
                             fontSize: 15,
                             fontWeight: FontWeight.w600,
@@ -697,7 +967,7 @@ class _RecommendedConceptCard extends StatelessWidget {
                       ),
                       child: Text(
                         concept.actionLabel,
-                        style: const TextStyle(
+                        style: GoogleFonts.dmSans(
                           fontWeight: FontWeight.w900,
                           fontSize: 15,
                         ),
@@ -754,7 +1024,7 @@ class _ConceptVisual extends StatelessWidget {
             ),
             child: Text(
               label,
-              style: const TextStyle(
+              style: GoogleFonts.dmSans(
                 color: Colors.white,
                 fontWeight: FontWeight.w800,
               ),
@@ -870,7 +1140,7 @@ class _QuickCheckCard extends StatelessWidget {
             children: [
               Text(
                 prompt.tag,
-                style: const TextStyle(
+                style: GoogleFonts.dmSans(
                   color: neuromathixBlue,
                   fontWeight: FontWeight.w900,
                   letterSpacing: 1,
@@ -880,7 +1150,7 @@ class _QuickCheckCard extends StatelessWidget {
               const SizedBox(height: 6),
               Text(
                 prompt.title,
-                style: const TextStyle(
+                style: GoogleFonts.dmSans(
                   fontSize: 20,
                   fontWeight: FontWeight.w900,
                 ),
@@ -888,7 +1158,7 @@ class _QuickCheckCard extends StatelessWidget {
               const SizedBox(height: 6),
               Text(
                 prompt.subtitle,
-                style: const TextStyle(color: neuromathixMuted, fontSize: 15),
+                style: GoogleFonts.dmSans(color: neuromathixMuted, fontSize: 15),
               ),
             ],
           );
@@ -918,7 +1188,7 @@ class _QuickCheckCard extends StatelessWidget {
                   ),
                   child: Text(
                     prompt.actionLabel,
-                    style: const TextStyle(
+                    style: GoogleFonts.dmSans(
                       fontWeight: FontWeight.w900,
                       fontSize: 16,
                     ),
@@ -992,7 +1262,7 @@ class _ProgressStatCard extends StatelessWidget {
             children: [
               Text(
                 stat.label,
-                style: const TextStyle(
+                style: GoogleFonts.dmSans(
                   color: neuromathixMuted,
                   fontSize: 16,
                   fontWeight: FontWeight.w600,
@@ -1001,7 +1271,7 @@ class _ProgressStatCard extends StatelessWidget {
               const SizedBox(height: 5),
               Text(
                 stat.value,
-                style: const TextStyle(
+                style: GoogleFonts.dmSans(
                   color: neuromathixText,
                   fontSize: 22,
                   fontWeight: FontWeight.w900,

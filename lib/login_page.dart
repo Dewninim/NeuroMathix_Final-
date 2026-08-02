@@ -1,8 +1,10 @@
 // Login Page — proj2 UI + proj1 real Firebase Auth
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 import 'providers/auth_provider.dart';
 import 'signup_page.dart';
+import 'theme/app_theme.dart';
 
 class LoginPage extends StatefulWidget {
   LoginPage({super.key});
@@ -49,15 +51,15 @@ class _LoginPageState extends State<LoginPage> {
               child: Column(mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Icon(Icons.psychology_alt_rounded, color: Colors.white, size: 36),
-                    SizedBox(height: 4),
-                    Text('NEUROMATHIX', style: TextStyle(color: Colors.white, fontSize: 9,
+                  Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Icon(Icons.psychology_alt_rounded, color: Colors.white, size: 36),
+                    const SizedBox(height: 4),
+                    Text('NEUROMATHIX', style: GoogleFonts.dmSans(color: Colors.white, fontSize: 9,
                         fontWeight: FontWeight.w700, letterSpacing: 1.5)),
                   ]),
                   const SizedBox(height: 80),
-                  const Text('Start your journey to\nmathematical mastery',
-                    style: TextStyle(color: Colors.white, fontSize: 36,
+                  Text('Start your journey to\nmathematical mastery',
+                    style: GoogleFonts.dmSans(color: Colors.white, fontSize: 36,
                         fontWeight: FontWeight.w800, height: 1.2)),
                   const SizedBox(height: 32),
                   ...['AI that adapts to your learning pace',
@@ -69,7 +71,7 @@ class _LoginPageState extends State<LoginPage> {
                         Container(width: 6, height: 6,
                             decoration: const BoxDecoration(shape: BoxShape.circle, color: Colors.white)),
                         const SizedBox(width: 12),
-                        Text(s, style: const TextStyle(color: Colors.white,
+                        Text(s, style: GoogleFonts.dmSans(color: Colors.white,
                             fontSize: 16, fontWeight: FontWeight.w600)),
                       ]))),
                 ]))),
@@ -85,11 +87,11 @@ class _LoginPageState extends State<LoginPage> {
                 child: Column(mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Sign in', style: TextStyle(color: Color(0xFF111827),
+                    Text('Sign in', style: GoogleFonts.dmSans(color: AppColors.textDark,
                         fontSize: 28, fontWeight: FontWeight.w800)),
                     const SizedBox(height: 6),
-                    const Text('Enter your credentials to continue',
-                        style: TextStyle(color: Color(0xFF6B7280), fontSize: 14)),
+                    Text('Enter your credentials to continue',
+                        style: GoogleFonts.dmSans(color: AppColors.textMuted, fontSize: 14)),
                     const SizedBox(height: 28),
                     _label('Email address'),
                     const SizedBox(height: 6),
@@ -108,27 +110,27 @@ class _LoginPageState extends State<LoginPage> {
                       child: ElevatedButton(
                         onPressed: auth.isLoading ? null : _signIn,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF1F4E95),
+                          backgroundColor: AppColors.accent,
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
                           elevation: 0),
                         child: auth.isLoading
                           ? const SizedBox(width: 20, height: 20,
                               child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                          : const Text('Sign in →', style: TextStyle(color: Colors.white,
+                          : Text('Sign in →', style: GoogleFonts.dmSans(color: Colors.white,
                               fontWeight: FontWeight.w700, fontSize: 15)))),
                     const SizedBox(height: 20),
-                    const Center(child: Text('New to NeuroMathix?',
-                        style: TextStyle(color: Color(0xFF6B7280), fontSize: 14))),
+                    Center(child: Text('New to NeuroMathix?',
+                        style: GoogleFonts.dmSans(color: AppColors.textMuted, fontSize: 14))),
                     const SizedBox(height: 10),
                     SizedBox(width: double.infinity, height: 50,
                       child: OutlinedButton(
                         onPressed: () => Navigator.pushReplacement(
                             context, MaterialPageRoute(builder: (_) => SignupPage())),
                         style: OutlinedButton.styleFrom(
-                          side: const BorderSide(color: Color(0xFF1F4E95), width: 1.5),
+                          side: const BorderSide(color: AppColors.accent, width: 1.5),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30))),
-                        child: const Text('Create account →', style: TextStyle(
-                            color: Color(0xFF1F4E95), fontWeight: FontWeight.w700, fontSize: 15)))),
+                        child: Text('Create account →', style: GoogleFonts.dmSans(
+                            color: AppColors.accent, fontWeight: FontWeight.w700, fontSize: 15)))),
                   ]))),
           ]),
         ],
@@ -137,14 +139,14 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   Widget _label(String t) => Text(t,
-    style: const TextStyle(color: Color(0xFF374151), fontWeight: FontWeight.w500, fontSize: 14));
+    style: GoogleFonts.dmSans(color: AppColors.textDark, fontWeight: FontWeight.w500, fontSize: 14));
 
   Widget _field({required TextEditingController controller, required String hint,
       bool obscure = false, Widget? suffix}) {
     return TextField(controller: controller, obscureText: obscure,
-      style: const TextStyle(color: Color(0xFF111827), fontSize: 15),
+      style: GoogleFonts.dmSans(color: AppColors.textDark, fontSize: 15),
       decoration: InputDecoration(hintText: hint,
-        hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
+        hintStyle: GoogleFonts.dmSans(color: AppColors.textFaint),
         suffixIcon: suffix != null ? Padding(padding: const EdgeInsets.only(right: 12), child: suffix) : null,
         suffixIconConstraints: const BoxConstraints(minWidth: 0, minHeight: 0),
         filled: true, fillColor: Colors.white,
@@ -154,6 +156,6 @@ class _LoginPageState extends State<LoginPage> {
         enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(30),
           borderSide: const BorderSide(color: Color(0xFFD1D5DB))),
         focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(30),
-          borderSide: const BorderSide(color: Color(0xFF1F4E95), width: 1.5))));
+          borderSide: const BorderSide(color: AppColors.accent, width: 1.5))));
   }
 }

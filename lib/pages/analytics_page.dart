@@ -1,7 +1,12 @@
 // Analytics Page - Tharuka Karunarathne
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:http/http.dart' as http;
+import '../config/api_config.dart';
 import '../models/student_learning_models.dart';
 import '../services/student_learning_service.dart';
+import '../theme/app_theme.dart';
 import '../widgets/student_app_shell.dart';
 
 class AnalyticsPage extends StatefulWidget {
@@ -42,12 +47,12 @@ class _AnalyticsPageState extends State<AnalyticsPage> {
           notificationCount: data?.notificationCount ?? 0,
           onSectionSelected: (section) => _openSection(context, section),
           child: hasError
-              ? const Center(
+              ? Center(
                   child: Padding(
-                    padding: EdgeInsets.all(32),
+                    padding: const EdgeInsets.all(32),
                     child: Text(
                       "Couldn't load your analytics right now. Please try again later.",
-                      style: TextStyle(color: Color(0xFF6B7280)),
+                      style: GoogleFonts.dmSans(color: AppColors.textMuted),
                     ),
                   ),
                 )
@@ -86,7 +91,7 @@ class _AnalyticsPageState extends State<AnalyticsPage> {
 /// (mock data happens to have 6, but this no longer assumes a fixed count).
 const _topicBarPalette = [
   Color(0xFF1a2f5e),
-  Color(0xFF1F4E95),
+  AppColors.accent,
   Color(0xFF2E86AB),
   Color(0xFF3A9BBF),
   Color(0xFF4DB8D4),
@@ -96,11 +101,145 @@ const _topicBarPalette = [
 (Color, Color) _trendColors(String trend) {
   switch (trend) {
     case 'Improving':
-      return (const Color(0xFF16A34A), const Color(0xFFDCFCE7));
+      return (AppColors.success, const Color(0xFFDCFCE7));
     case 'Declining':
-      return (const Color(0xFFDC2626), const Color(0xFFFEE2E2));
+      return (AppColors.error, const Color(0xFFFEE2E2));
     default:
-      return (const Color(0xFF374151), const Color(0xFFF3F4F6));
+      return (const Color(0xFF374151), AppColors.bgPage);
+  }
+}
+
+/// Real per-material progress, straight from GET /user/<uid>/materials —
+/// see the comment where this is inserted in _AnalyticsContent for why the
+/// rest of this page (mastery trend, topic breakdown) is still mock.
+class _MaterialsOverviewSection extends StatefulWidget {
+  final String studentId;
+  const _MaterialsOverviewSection({required this.studentId});
+
+  @override
+  State<_MaterialsOverviewSection> createState() => _MaterialsOverviewSectionState();
+}
+
+class _MaterialsOverviewSectionState extends State<_MaterialsOverviewSection> {
+  late Future<List<_MaterialProgress>> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _fetch();
+  }
+
+  Future<List<_MaterialProgress>> _fetch() async {
+    final r = await http
+        .get(Uri.parse('$kApiBaseUrl/user/${widget.studentId}/materials'))
+        .timeout(const Duration(seconds: 20));
+    if (r.statusCode != 200) throw Exception('Could not load materials (${r.statusCode})');
+    final data = jsonDecode(r.body) as Map<String, dynamic>;
+    return (data['materials'] as List? ?? [])
+        .cast<Map<String, dynamic>>()
+        .map((m) => _MaterialProgress.fromJson(m))
+        .toList();
+  }
+
+  Widget _cardWrap({required Widget child}) => Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppColors.border),
+        ),
+        child: child,
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<_MaterialProgress>>(
+      future: _future,
+      builder: (context, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return _cardWrap(
+            child: const SizedBox(height: 60, child: Center(child: CircularProgressIndicator(strokeWidth: 2))),
+          );
+        }
+        final materials = snap.data ?? [];
+        if (snap.hasError || materials.isEmpty) return const SizedBox.shrink();
+
+        return _cardWrap(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.menu_book_outlined, size: 18, color: AppColors.textMuted),
+                  const SizedBox(width: 8),
+                  Text('Your Materials',
+                      style: GoogleFonts.dmSans(fontWeight: FontWeight.w700, fontSize: 15, color: AppColors.textDark)),
+                ],
+              ),
+              const SizedBox(height: 14),
+              ...materials.map((m) => Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          flex: 3,
+                          child: Text(m.filename,
+                              style: GoogleFonts.dmSans(fontSize: 12.5, fontWeight: FontWeight.w600, color: AppColors.textDark),
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                        ),
+                        Expanded(
+                          flex: 2,
+                          child: Text('${m.sessionCount} session${m.sessionCount == 1 ? '' : 's'}',
+                              style: GoogleFonts.dmSans(fontSize: 11.5, color: AppColors.textMuted)),
+                        ),
+                        Expanded(
+                          flex: 2,
+                          child: Text('${m.coveragePercent.toStringAsFixed(0)}% covered',
+                              style: GoogleFonts.dmSans(fontSize: 11.5, color: AppColors.textMuted)),
+                        ),
+                        SizedBox(
+                          width: 60,
+                          child: m.latestScore == null
+                              ? Text('—', style: GoogleFonts.dmSans(fontSize: 11.5, color: AppColors.textFaint))
+                              : Text('${(m.latestScore! * 100).round()}%',
+                                  textAlign: TextAlign.right,
+                                  style: GoogleFonts.dmSans(
+                                      fontSize: 12.5,
+                                      fontWeight: FontWeight.w700,
+                                      color: m.latestScore! >= 0.7 ? AppColors.success : AppColors.error)),
+                        ),
+                      ],
+                    ),
+                  )),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _MaterialProgress {
+  final String filename;
+  final int sessionCount;
+  final double coveragePercent;
+  final double? latestScore;
+
+  _MaterialProgress({
+    required this.filename,
+    required this.sessionCount,
+    required this.coveragePercent,
+    required this.latestScore,
+  });
+
+  factory _MaterialProgress.fromJson(Map<String, dynamic> j) {
+    final latest = j['latest_session'] as Map<String, dynamic>?;
+    return _MaterialProgress(
+      filename: (j['filename'] as String? ?? 'Untitled.pdf').replaceAll('.pdf', ''),
+      sessionCount: j['session_count'] as int? ?? 0,
+      coveragePercent: (j['material_coverage_percent'] as num?)?.toDouble() ?? 0,
+      latestScore: (latest?['score'] as num?)?.toDouble(),
+    );
   }
 }
 
@@ -117,20 +256,31 @@ class _AnalyticsContent extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Header
-          const Text(
+          Text(
             'Progress & Analytics',
-            style: TextStyle(
+            style: GoogleFonts.dmSans(
               fontSize: 24,
               fontWeight: FontWeight.w800,
-              color: Color(0xFF111827),
+              color: AppColors.textDark,
             ),
           ),
           const SizedBox(height: 4),
-          const Text(
+          Text(
             'Track your learning journey and identify areas for improvement',
-            style: TextStyle(color: Color(0xFF6B7280), fontSize: 14),
+            style: GoogleFonts.dmSans(color: AppColors.textMuted, fontSize: 14),
           ),
           const SizedBox(height: 28),
+
+          // ── REAL DATA — from GET /user/<uid>/materials, unlike the mastery
+          // trend / topic breakdown / stat cards below, which still come
+          // from FirestoreStudentLearningService's seeded mock data. Making
+          // those genuinely real needs backend aggregation endpoints
+          // (mastery-over-time, total problems solved, topic-level scores)
+          // that don't exist yet — this section uses what the backend
+          // actually can tell us today: per-material session count, latest
+          // score, and material coverage.
+          _MaterialsOverviewSection(studentId: data.studentId),
+          const SizedBox(height: 24),
 
           // ── Stat cards row ──
           Row(
@@ -173,19 +323,19 @@ class _AnalyticsContent extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Row(
-                        children: const [
-                          Icon(
+                        children: [
+                          const Icon(
                             Icons.trending_up_rounded,
                             size: 18,
-                            color: Color(0xFF6B7280),
+                            color: AppColors.textMuted,
                           ),
-                          SizedBox(width: 8),
+                          const SizedBox(width: 8),
                           Text(
                             'Mastery Progress Over Time',
-                            style: TextStyle(
+                            style: GoogleFonts.dmSans(
                               fontWeight: FontWeight.w700,
                               fontSize: 15,
-                              color: Color(0xFF111827),
+                              color: AppColors.textDark,
                             ),
                           ),
                         ],
@@ -194,13 +344,13 @@ class _AnalyticsContent extends StatelessWidget {
                       SizedBox(
                         height: 200,
                         child: data.masteryProgressTrend.isEmpty
-                            ? const Center(
+                            ? Center(
                                 child: Text(
                                   'No progress data yet — complete a\nlearning session to see your trend.',
                                   textAlign: TextAlign.center,
-                                  style: TextStyle(
+                                  style: GoogleFonts.dmSans(
                                     fontSize: 12,
-                                    color: Color(0xFF9CA3AF),
+                                    color: AppColors.textFaint,
                                   ),
                                 ),
                               )
@@ -222,9 +372,9 @@ class _AnalyticsContent extends StatelessWidget {
                               .map(
                                 (p) => Text(
                                   p.label,
-                                  style: const TextStyle(
+                                  style: GoogleFonts.dmSans(
                                     fontSize: 10,
-                                    color: Color(0xFF9CA3AF),
+                                    color: AppColors.textFaint,
                                   ),
                                 ),
                               )
@@ -236,14 +386,14 @@ class _AnalyticsContent extends StatelessWidget {
                           Container(
                             width: 12,
                             height: 2,
-                            color: const Color(0xFF1F4E95),
+                            color: AppColors.accent,
                           ),
                           const SizedBox(width: 6),
-                          const Text(
+                          Text(
                             'Mastery Progress Over Time',
-                            style: TextStyle(
+                            style: GoogleFonts.dmSans(
                               fontSize: 11,
-                              color: Color(0xFF6B7280),
+                              color: AppColors.textMuted,
                             ),
                           ),
                         ],
@@ -261,19 +411,19 @@ class _AnalyticsContent extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Row(
-                        children: const [
-                          Icon(
+                        children: [
+                          const Icon(
                             Icons.adjust_rounded,
                             size: 18,
-                            color: Color(0xFF6B7280),
+                            color: AppColors.textMuted,
                           ),
-                          SizedBox(width: 8),
+                          const SizedBox(width: 8),
                           Text(
                             'Topic Mastery Breakdown',
-                            style: TextStyle(
+                            style: GoogleFonts.dmSans(
                               fontWeight: FontWeight.w700,
                               fontSize: 15,
-                              color: Color(0xFF111827),
+                              color: AppColors.textDark,
                             ),
                           ),
                         ],
@@ -288,9 +438,9 @@ class _AnalyticsContent extends StatelessWidget {
                               .map(
                                 (l) => Text(
                                   l,
-                                  style: const TextStyle(
+                                  style: GoogleFonts.dmSans(
                                     fontSize: 10,
-                                    color: Color(0xFF9CA3AF),
+                                    color: AppColors.textFaint,
                                   ),
                                 ),
                               )
@@ -299,13 +449,13 @@ class _AnalyticsContent extends StatelessWidget {
                       ),
                       const SizedBox(height: 8),
                       if (data.topicMastery.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 24),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 24),
                           child: Text(
                             'No topic data yet.',
-                            style: TextStyle(
+                            style: GoogleFonts.dmSans(
                               fontSize: 12,
-                              color: Color(0xFF9CA3AF),
+                              color: AppColors.textFaint,
                             ),
                           ),
                         )
@@ -322,9 +472,9 @@ class _AnalyticsContent extends StatelessWidget {
                                   width: 90,
                                   child: Text(
                                     topic.topic,
-                                    style: const TextStyle(
+                                    style: GoogleFonts.dmSans(
                                       fontSize: 11,
-                                      color: Color(0xFF374151),
+                                      color: const Color(0xFF374151),
                                     ),
                                     overflow: TextOverflow.ellipsis,
                                   ),
@@ -335,7 +485,7 @@ class _AnalyticsContent extends StatelessWidget {
                                       Container(
                                         height: 20,
                                         decoration: BoxDecoration(
-                                          color: const Color(0xFFF3F4F6),
+                                          color: AppColors.bgPage,
                                           borderRadius:
                                               BorderRadius.circular(4),
                                         ),
@@ -358,10 +508,10 @@ class _AnalyticsContent extends StatelessWidget {
                                 const SizedBox(width: 8),
                                 Text(
                                   '${topic.masteryPercent}',
-                                  style: const TextStyle(
+                                  style: GoogleFonts.dmSans(
                                     fontSize: 11,
                                     fontWeight: FontWeight.w600,
-                                    color: Color(0xFF374151),
+                                    color: const Color(0xFF374151),
                                   ),
                                 ),
                               ],
@@ -374,14 +524,14 @@ class _AnalyticsContent extends StatelessWidget {
                           Container(
                             width: 12,
                             height: 12,
-                            color: const Color(0xFF1F4E95),
+                            color: AppColors.accent,
                           ),
                           const SizedBox(width: 6),
-                          const Text(
+                          Text(
                             'Topic Mastery Breakdown',
-                            style: TextStyle(
+                            style: GoogleFonts.dmSans(
                               fontSize: 11,
-                              color: Color(0xFF6B7280),
+                              color: AppColors.textMuted,
                             ),
                           ),
                         ],
@@ -395,12 +545,12 @@ class _AnalyticsContent extends StatelessWidget {
           const SizedBox(height: 24),
 
           // ── AI Insights section ──
-          const Text(
+          Text(
             'Insights',
-            style: TextStyle(
+            style: GoogleFonts.dmSans(
               fontSize: 18,
               fontWeight: FontWeight.w700,
-              color: Color(0xFF111827),
+              color: AppColors.textDark,
             ),
           ),
           const SizedBox(height: 16),
@@ -413,19 +563,19 @@ class _AnalyticsContent extends StatelessWidget {
           const SizedBox(height: 28),
 
           // ── Detailed Topic Analysis ──
-          const Text(
+          Text(
             'Detailed Topic Analysis',
-            style: TextStyle(
+            style: GoogleFonts.dmSans(
               fontSize: 18,
               fontWeight: FontWeight.w700,
-              color: Color(0xFF111827),
+              color: AppColors.textDark,
             ),
           ),
           const SizedBox(height: 16),
           if (data.topicMastery.isEmpty)
-            const Text(
+            Text(
               'Complete a learning session to see a per-topic breakdown here.',
-              style: TextStyle(fontSize: 13, color: Color(0xFF6B7280)),
+              style: GoogleFonts.dmSans(fontSize: 13, color: AppColors.textMuted),
             )
           else
             ...data.topicMastery.map((topic) {
@@ -437,10 +587,10 @@ class _AnalyticsContent extends StatelessWidget {
                   children: [
                     Text(
                       topic.topic,
-                      style: const TextStyle(
+                      style: GoogleFonts.dmSans(
                         fontWeight: FontWeight.w600,
                         fontSize: 14,
-                        color: Color(0xFF111827),
+                        color: AppColors.textDark,
                       ),
                     ),
                     const SizedBox(height: 6),
@@ -452,7 +602,7 @@ class _AnalyticsContent extends StatelessWidget {
                               Container(
                                 height: 10,
                                 decoration: BoxDecoration(
-                                  color: const Color(0xFFF3F4F6),
+                                  color: AppColors.bgPage,
                                   borderRadius: BorderRadius.circular(6),
                                 ),
                               ),
@@ -461,7 +611,7 @@ class _AnalyticsContent extends StatelessWidget {
                                 child: Container(
                                   height: 10,
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF1F4E95),
+                                    color: AppColors.accent,
                                     borderRadius: BorderRadius.circular(6),
                                   ),
                                 ),
@@ -472,10 +622,10 @@ class _AnalyticsContent extends StatelessWidget {
                         const SizedBox(width: 12),
                         Text(
                           '${topic.masteryPercent}',
-                          style: const TextStyle(
+                          style: GoogleFonts.dmSans(
                             fontWeight: FontWeight.w700,
                             fontSize: 14,
-                            color: Color(0xFF111827),
+                            color: AppColors.textDark,
                           ),
                         ),
                         const SizedBox(width: 12),
@@ -490,7 +640,7 @@ class _AnalyticsContent extends StatelessWidget {
                           ),
                           child: Text(
                             topic.trend,
-                            style: TextStyle(
+                            style: GoogleFonts.dmSans(
                               color: textColor,
                               fontSize: 12,
                               fontWeight: FontWeight.w600,
@@ -526,7 +676,7 @@ class _AnalyticsContent extends StatelessWidget {
           color: const Color(0xFFF0FDF4),
           borderColor: const Color(0xFF86EFAC),
           icon: Icons.trending_up_rounded,
-          iconColor: const Color(0xFF16A34A),
+          iconColor: AppColors.success,
           title: '${t.topic} Improving',
           body:
               'Your mastery in ${t.topic} is trending up — now at ${t.masteryPercent}%. Keep it going!',
@@ -555,7 +705,7 @@ class _AnalyticsContent extends StatelessWidget {
           color: const Color(0xFFF0FDF4),
           borderColor: const Color(0xFF86EFAC),
           icon: Icons.emoji_events_outlined,
-          iconColor: const Color(0xFF16A34A),
+          iconColor: AppColors.success,
           title: 'Streak Achievement',
           body:
               "You've maintained a ${content.data.currentStreakDays}-day study streak! Consistency is key to retention.",
@@ -566,10 +716,10 @@ class _AnalyticsContent extends StatelessWidget {
     if (cards.isEmpty) {
       cards.add(
         _insightCard(
-          color: const Color(0xFFF3F4F6),
-          borderColor: const Color(0xFFE5E7EB),
+          color: AppColors.bgPage,
+          borderColor: AppColors.border,
           icon: Icons.insights_outlined,
-          iconColor: const Color(0xFF6B7280),
+          iconColor: AppColors.textMuted,
           title: 'Not enough data yet',
           body:
               'Complete a few learning sessions and check back — your personalised insights will show up here.',
@@ -587,28 +737,28 @@ class _AnalyticsContent extends StatelessWidget {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: const Color(0xFFE5E7EB)),
+          border: Border.all(color: AppColors.border),
         ),
         child: Row(
           children: [
-            Icon(icon, size: 22, color: const Color(0xFF6B7280)),
+            Icon(icon, size: 22, color: AppColors.textMuted),
             const SizedBox(width: 12),
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   value,
-                  style: const TextStyle(
+                  style: GoogleFonts.dmSans(
                     fontSize: 22,
                     fontWeight: FontWeight.w800,
-                    color: Color(0xFF111827),
+                    color: AppColors.textDark,
                   ),
                 ),
                 Text(
                   label,
-                  style: const TextStyle(
+                  style: GoogleFonts.dmSans(
                     fontSize: 12,
-                    color: Color(0xFF6B7280),
+                    color: AppColors.textMuted,
                   ),
                 ),
               ],
@@ -625,7 +775,7 @@ class _AnalyticsContent extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFE5E7EB)),
+        border: Border.all(color: AppColors.border),
       ),
       child: child,
     );
@@ -656,10 +806,10 @@ class _AnalyticsContent extends StatelessWidget {
               Expanded(
                 child: Text(
                   title,
-                  style: const TextStyle(
+                  style: GoogleFonts.dmSans(
                     fontWeight: FontWeight.w700,
                     fontSize: 14,
-                    color: Color(0xFF111827),
+                    color: AppColors.textDark,
                   ),
                 ),
               ),
@@ -668,7 +818,7 @@ class _AnalyticsContent extends StatelessWidget {
           const SizedBox(height: 8),
           Text(
             body,
-            style: const TextStyle(
+            style: GoogleFonts.dmSans(
               fontSize: 13,
               color: Color(0xFF374151),
               height: 1.4,
@@ -695,7 +845,7 @@ class _LineChartPainter extends CustomPainter {
 
     // Y-axis grid lines
     final gridPaint = Paint()
-      ..color = const Color(0xFFE5E7EB)
+      ..color = AppColors.border
       ..strokeWidth = 1;
     for (var i = 0; i <= 4; i++) {
       final y = size.height - (i / 4) * size.height;
@@ -704,7 +854,7 @@ class _LineChartPainter extends CustomPainter {
       final tp = TextPainter(
         text: TextSpan(
           text: '${(i * 25).toInt()}',
-          style: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 10),
+          style: GoogleFonts.dmSans(color: AppColors.textFaint, fontSize: 10),
         ),
         textDirection: TextDirection.ltr,
       )..layout();
@@ -737,15 +887,15 @@ class _LineChartPainter extends CustomPainter {
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
-            const Color(0xFF1F4E95).withValues(alpha: 0.25),
-            const Color(0xFF1F4E95).withValues(alpha: 0.02),
+            AppColors.accent.withValues(alpha: 0.25),
+            AppColors.accent.withValues(alpha: 0.02),
           ],
         ).createShader(Rect.fromLTWH(0, 0, size.width, size.height)),
     );
 
     // Line
     final linePaint = Paint()
-      ..color = const Color(0xFF1F4E95)
+      ..color = AppColors.accent
       ..strokeWidth = 2.5
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
@@ -768,7 +918,7 @@ class _LineChartPainter extends CustomPainter {
         p,
         4,
         Paint()
-          ..color = const Color(0xFF1F4E95)
+          ..color = AppColors.accent
           ..style = PaintingStyle.stroke
           ..strokeWidth = 2,
       );

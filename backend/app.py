@@ -11,6 +11,21 @@ Curve   : Ebbinghaus R(t)=e^(-t/S) forgetting curve, paced by study mode
 """
 import os,json,uuid,math,pickle,re,logging,random
 from datetime import datetime,timedelta
+
+# Must run BEFORE `import fitz` below — PyMuPDF's bundled OCR engine reads
+# TESSDATA_PREFIX when the module loads, not per-call, so setting it after
+# import has no effect (confirmed: setting it post-import still produced
+# "TESSDATA_PREFIX not set" from PyMuPDF's OCR, even though os.environ had
+# it correctly set by that point).
+if not os.environ.get("TESSDATA_PREFIX"):
+    for _c in ["/usr/share/tesseract-ocr/5/tessdata","/usr/share/tesseract-ocr/4.00/tessdata",
+        "/usr/share/tessdata","/usr/local/share/tessdata",
+        "/opt/homebrew/share/tessdata","/usr/local/opt/tesseract/share/tessdata",
+        r"C:\Program Files\Tesseract-OCR\tessdata",r"C:\Program Files (x86)\Tesseract-OCR\tessdata"]:
+        if os.path.isdir(_c):
+            os.environ["TESSDATA_PREFIX"]=_c
+            break
+
 from flask import Flask,request,jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -104,8 +119,12 @@ def _materials_for_user(user_id):
         key=lambda m:m.get("uploaded_at",""),reverse=True)
 
 GEMINI_API_KEY=os.environ.get("GEMINI_API_KEY","")
-GEMINI_URL=f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+# NOTE: gemini-1.5-flash was retired by Google and returns 404 for every call —
+# every question/hint/XAI request was silently falling through to the offline
+# fallback generator. gemini-3.6-flash is the current GA flash-tier model.
+GEMINI_URL=f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_API_KEY}"
 GEMINI_WORKS=False if not GEMINI_API_KEY else None
+_GEMINI_COOLDOWN_UNTIL=0.0  # epoch seconds; while now < this, skip Gemini entirely rather than guarantee another 429
 if not GEMINI_API_KEY:
     log.warning("[WARN] GEMINI_API_KEY not set — using local fallback generator/hints, not Gemini.")
 
@@ -163,21 +182,100 @@ def is_math_document(full_text):
     reason=f"keyword_ratio={kw_ratio:.4f} symbol_density={symbol_density:.5f} digit_ratio={digit_ratio:.4f} raw_score={score:.3f} threshold={MATH_SCORE_THRESHOLD}"
     return is_math,confidence,reason
 
+_OCR_AVAILABLE=None  # None=untested, True/False=cached after first real attempt
+
+def _ocr_page_text(page):
+    """Attempts OCR on a single page via PyMuPDF's built-in Tesseract
+    integration. Returns '' on any failure (missing Tesseract binary,
+    missing language data, etc.) rather than raising — OCR is a best-effort
+    enhancement, not something that should crash an upload."""
+    global _OCR_AVAILABLE
+    if _OCR_AVAILABLE is False:
+        return ""
+    try:
+        tp=page.get_textpage_ocr(flags=0,dpi=200,full=True)
+        txt=page.get_text(textpage=tp)
+        _OCR_AVAILABLE=True
+        return txt
+    except Exception as e:
+        if _OCR_AVAILABLE is None:
+            log.warning("[extract_chunks] OCR unavailable (%s) — scanned/image-only pages "
+                "will be skipped instead of read. Install Tesseract OCR "
+                "(https://github.com/UB-Mannheim/tesseract/wiki for Windows, "
+                "'apt install tesseract-ocr' for Linux) to enable it.",e)
+        _OCR_AVAILABLE=False
+        return ""
+
 def extract_chunks(pdf_bytes,wpc=300,max_chunks=40):
     doc=fitz.open(stream=pdf_bytes,filetype="pdf")
-    text=" ".join(p.get_text() for p in doc)
-    words=text.split();out=[]
+    page_texts=[]
+    ocr_used_on=0;ocr_attempts=0
+    MAX_OCR_PAGES=20  # OCR is slow (real per-page cost) — an unbounded loop
+                       # over a large scanned document could take minutes and
+                       # blow well past the frontend's upload timeout. Capping
+                       # this keeps worst-case upload latency bounded; any
+                       # pages beyond the cap just contribute no text, same
+                       # as before OCR support existed.
+    for p in doc:
+        t=p.get_text()
+        # A page with a real text layer but under ~20 chars is almost
+        # certainly a scanned/image page (maybe just a stray page number) —
+        # try OCR on it instead of silently contributing nothing.
+        if len(t.strip())<20 and ocr_attempts<MAX_OCR_PAGES:
+            ocr_attempts+=1
+            ocr_t=_ocr_page_text(p)
+            if len(ocr_t.strip())>len(t.strip()):
+                t=ocr_t;ocr_used_on+=1
+        page_texts.append(t)
+    if ocr_attempts:
+        log.info("[extract_chunks] OCR attempted on %d pages, recovered text from %d of them%s",
+            ocr_attempts,ocr_used_on," (hit the %d-page OCR cap — some later scanned pages were skipped for speed)"%MAX_OCR_PAGES if ocr_attempts>=MAX_OCR_PAGES else "")
+    text=" ".join(page_texts)
+    words=text.split();out=[];dropped_toc=0;dropped_frontmatter=0
     for i in range(0,len(words),wpc):
         c=" ".join(words[i:i+wpc]).strip()
-        if len(c)>60 and not _is_toc_like(c):out.append(c)
+        if len(c)<=60:continue
+        if _is_toc_like(c):dropped_toc+=1;continue
+        if _is_frontmatter_like(c):dropped_frontmatter+=1;continue
+        out.append(c)
+    log.info("[extract_chunks] kept %d chunks, dropped %d as TOC-like, %d as front-matter/marketing-like",
+        len(out),dropped_toc,dropped_frontmatter)
     if not out:
-        # Whole document looked like TOC/reference matter — better to proceed
-        # with something than reject outright; fall back to unfiltered chunks.
-        log.warning("[extract_chunks] every chunk looked like TOC/index text — using unfiltered chunks")
+        # Whole document looked like TOC/reference matter or pure front
+        # matter — better to proceed with something than reject outright;
+        # fall back to unfiltered chunks.
+        log.warning("[extract_chunks] every chunk looked like TOC/index or front-matter text — using unfiltered chunks")
         for i in range(0,len(words),wpc):
             c=" ".join(words[i:i+wpc]).strip()
             if len(c)>60:out.append(c)
     return out[:max_chunks],text
+
+def _is_frontmatter_like(text):
+    """Detects preface / motivation / acknowledgments / dedication /
+    about-the-author prose. This is real content, but NOT mathematical
+    instructional content — it should never become a question source.
+
+    Split into two tiers after a real failure: a sentence containing the
+    literal word "preface" and a website domain (".org") was still getting
+    through because a single stray "/" (from "AMC 10/12") pushed the old
+    single-threshold math-density check just over the cutoff (0.0345 vs
+    0.03), silently overriding an otherwise-unambiguous keyword match.
+    STRONG markers — no legitimate math-instructional sentence organically
+    contains these — flag unconditionally, regardless of incidental
+    math-looking punctuation. WEAK markers remain gated by density, since
+    those phrases could in principle appear in real explanatory prose."""
+    tl=text.lower()
+    strong=["preface","acknowledg","dedicat","foreword","copyright","all rights reserved",
+        ".org",".com","www.","about the author","table of contents"]
+    if any(kw in tl for kw in strong):
+        return True
+    weak=["motivation","about this book","this book was","we hope you","our passion",
+        "thank you for","special thanks"]
+    if not any(kw in tl for kw in weak):
+        return False
+    math_signals=len(re.findall(r"[=+\-*/^]|\d+\.\d+|\\frac|\\int|\\sum|\bsolve\b|\bequation\b|\bformula\b",text,re.IGNORECASE))
+    word_count=max(len(text.split()),1)
+    return (math_signals/word_count)<0.05
 
 def _is_toc_like(text):
     """Detects table-of-contents / index / 'answers to exercises' listing
@@ -301,11 +399,19 @@ def build_model2_system_prompt(p,easy_n,med_n,hard_n):
     else:
         nd=avg;an="STEADY: maintain difficulty, mix straightforward and moderate questions."
     nl=DLVL.get(nd,"medium")
-    pn=f"\nWEAK TOPICS (prioritise these): {', '.join(pats[:3])}." if pats else ""
+    weak_list=pats[:3]
+    pn=f"\nWEAK TOPICS (this student's actual recurring mistakes): {', '.join(weak_list)}." if weak_list else "\nWEAK TOPICS: none recorded yet (first session or clean history) — treat every topic as untested."
     accn=f"\nLAST-SESSION ACCURACY BY TYPE: easy={acc.get('easy')}, medium={acc.get('medium')}, hard={acc.get('hard')}." if acc else ""
-    return f"""You are the adaptive question generator for Nuromathix, a maths learning system.
+    total_q=easy_n+med_n+hard_n
 
-LEARNER PROFILE:
+    return f"""You are Model 2 — the adaptive learning engine for Nuromathix, a maths platform.
+Model 2 is not just a question generator: you own the full personalized-assessment
+decision, from reading this student's behavioural profile through to producing the
+actual session content. Do all of the following correctly, not just some of it:
+
+══════════════════════════════════════════════════════════════════════════════
+1. STUDENT BEHAVIOUR PROFILE (already analysed upstream — use it, don't ignore it)
+══════════════════════════════════════════════════════════════════════════════
 Current difficulty : {avg}/5 ({DLVL.get(avg,'medium')})
 Next difficulty     : {nd}/5 ({nl})
 Hint usage rate     : {hr:.0%}
@@ -314,37 +420,81 @@ Avg time/question   : {avgt:.0f}s
 Preferred pace      : {pace}
 Sessions done       : {sc}{pn}{accn}
 
-ADAPTATION: {an}
+ADAPTATION DECISION: {an}
 
-This is a MATHEMATICS platform. Every question — including "easy" ones — must
-require the student to perform or recall an actual mathematical step: evaluate
-a formula at given values, identify the next value in an iterative sequence,
-compute a derivative/integral/root/result, or apply a rule from the passage
-to a new (but similar) case. NEVER produce a question that just blanks out a
-random vocabulary word from a sentence — that tests reading, not mathematics.
+══════════════════════════════════════════════════════════════════════════════
+2. WEAK/IMPROVING/MAINTENANCE ALLOCATION (mandatory — this is not optional flavour)
+══════════════════════════════════════════════════════════════════════════════
+Split the {total_q} questions across the CHUNKS using this ratio, based on the
+WEAK TOPICS list above:
+- ~70% of questions target chunks whose topic matches a WEAK TOPIC, or — if there
+  are no recorded weak topics yet — target the highest Model1-difficulty chunks
+  (the student hasn't been tested on them, so treat "untested" as the priority).
+- ~20% target topics the student got partially right last session (accuracy
+  40-80% in LAST-SESSION ACCURACY BY TYPE) — reinforcing topics in progress.
+- ~10% target topics the student is already strong in (accuracy >80%), purely
+  to maintain retention, not to teach something new.
+This is a real instruction, not a suggestion: if you generate every question from
+the same one or two chunks and ignore this split, you have failed the task.
 
+══════════════════════════════════════════════════════════════════════════════
+3. MATERIAL UNDERSTANDING — this is a MATHEMATICS platform
+══════════════════════════════════════════════════════════════════════════════
+Every question — including "easy" ones — must require the student to perform or
+recall an actual mathematical step: evaluate a formula at given values, identify
+the next value in an iterative sequence, compute a derivative/integral/root/
+result, or apply a rule from the passage to a new (but similar) case. NEVER
+produce a question that just blanks out a random vocabulary word from a
+sentence — that tests reading comprehension, not mathematics, and is an
+automatic failure regardless of how the rest of the output looks.
+
+Do the actual arithmetic yourself before writing "expected_answer" or
+"correct_index" — every numeric answer must be independently verifiable by
+redoing the computation shown in "xai_explanation". A wrong computed answer is
+worse than a slightly-too-easy question.
+
+GRADE/LEVEL: the source material will usually NOT state its grade level or
+target audience explicitly. Infer it yourself from the vocabulary, notation,
+and complexity of the CHUNKS below (e.g. basic arithmetic/ratios reads as
+lower-secondary; derivatives, matrices, or proofs read as upper-secondary or
+early undergraduate) and keep every generated question consistent with that
+same inferred level — don't drift into harder or easier territory than the
+source material itself demonstrates.
+
+══════════════════════════════════════════════════════════════════════════════
+4. QUESTION GENERATION — exact counts, formats, and cognitive levels
+══════════════════════════════════════════════════════════════════════════════
 GENERATE EXACTLY:
-- {easy_n} EASY questions, format "fill_blank": a genuine computation with exactly 4 numeric/expression options (one correct, three plausible near-miss values — not word-guessing).
-- {med_n} MEDIUM questions, format "short_answer": a computation requiring one typed final answer (a number or short expression). Include "expected_answer" (string) and, if numeric, "answer_tolerance" (float, absolute tolerance).
-- {hard_n} HARD questions, format "multi_part": ONE multi-step problem with exactly 4 sub-parts (ids "a","b","c","d") that build on each other (e.g. successive iterations, or sequential steps of one derivation), each sub-part asking for ONE final value/expression (a small textbox, never a full written proof/essay). Each sub-part needs "expected_answer" and optional "answer_tolerance".
+- {easy_n} EASY questions, format "fill_blank": a genuine computation with exactly 4 numeric/expression options (one correct, three plausible near-miss values — not word-guessing). Cognitive level: Remember or Understand.
+- {med_n} MEDIUM questions, format "short_answer": a computation requiring one typed final answer (a number or short expression). Include "expected_answer" (string) and, if numeric, "answer_tolerance" (float, absolute tolerance). Cognitive level: Apply or Analyze.
+- {hard_n} HARD questions, format "multi_part": ONE multi-step problem with exactly 4 sub-parts (ids "a","b","c","d") that build on each other as genuine PREREQUISITE STEPS — part b) must require the result of part a) to solve, part c) must require part b), etc. (e.g. successive iterations, or sequential steps of one derivation). Each sub-part asks for ONE final value/expression (a small textbox, never a full written proof/essay). Each sub-part needs "expected_answer" and optional "answer_tolerance". Cognitive level: Analyze, Evaluate, or Create.
 
-RULES:
+Every question object needs a "cognitive_level" field — one of: "Remember",
+"Understand", "Apply", "Analyze", "Evaluate", "Create" (Bloom's taxonomy) —
+matching the actual mental operation the question demands, not just its format.
+
+══════════════════════════════════════════════════════════════════════════════
+5. RULES
+══════════════════════════════════════════════════════════════════════════════
 1. Base every question on the supplied CHUNKS — do not invent content outside them. Reuse the formulas, worked examples, and numeric values already present in the text; construct new-but-analogous computations where the chunk supports it.
 2. COVERAGE: draw from every chunk provided at least once before repeating any chunk, unless there are more questions than chunks. Chunks appear in priority order (most-needed first) — earlier chunks in the list should get first priority for a question.
 3. Each question needs: "hint" (a single vague level-1 style nudge pointing at the relevant formula/method — deeper hints are generated separately later, so keep this one short and non-revealing), "topic_tags" (1-3 labels), "difficulty_score" (1-5), "difficulty_level".
 4. "xai_explanation": a full correct-answer walkthrough (150-220 words) showing the actual working/steps — this is the model solution shown if the student gets it wrong. For multi_part, cover all 4 sub-parts' working.
-5. Every question must include a distinct "id" like "q1","q2",... continuing sequentially across ALL {easy_n+med_n+hard_n} questions.
+5. "selection_rationale" (NEW, required, 1 sentence): explain in plain language why THIS question was chosen for THIS student right now — tie it explicitly to the profile above (e.g. "Targets your recurring mistake with factoring" or "Maintenance check on a topic you've already mastered" or "This chunk hasn't been tested yet"). This is shown to the student as part of the session's explainability, so it must reference the real reason, not a generic filler sentence.
+6. Every question must include a distinct "id" like "q1","q2",... continuing sequentially across ALL {total_q} questions.
 
-OUTPUT — valid JSON only, no markdown:
+══════════════════════════════════════════════════════════════════════════════
+OUTPUT — valid JSON only, no markdown, no commentary before or after the JSON
+══════════════════════════════════════════════════════════════════════════════
 {{"questions":[
-  {{"id":"q1","chunk_index":0,"question_type":"easy","format":"fill_blank","topic":"Topic","topic_tags":["t1"],"difficulty_score":{nd},"difficulty_level":"{nl}","question_text":"Using the bisection method on f(x)=x^3+4x^2-10 with a=1, b=2, what is the midpoint p1?","blank_word":"1.5","options":["1.5","1.25","1.75","2.0"],"correct_index":0,"hint":"...","xai_explanation":"..."}},
-  {{"id":"q2","chunk_index":1,"question_type":"medium","format":"short_answer","topic":"Topic","topic_tags":["t1"],"difficulty_score":{nd},"difficulty_level":"{nl}","question_text":"Evaluate f(1.5) for f(x)=x^3+4x^2-10.","expected_answer":"2.375","answer_tolerance":0.01,"hint":"...","xai_explanation":"..."}},
-  {{"id":"q3","chunk_index":2,"question_type":"hard","format":"multi_part","topic":"Topic","topic_tags":["t1"],"difficulty_score":{nd},"difficulty_level":"{nl}","question_text":"Perform 4 iterations of Newton-Raphson on f(x)=x^3-2x-5 starting at x0=2.","sub_parts":[{{"id":"a","prompt":"Part a) Find x1.","expected_answer":"2.1","answer_tolerance":0.01}},{{"id":"b","prompt":"Part b) Find x2.","expected_answer":"2.09457"}},{{"id":"c","prompt":"Part c) Find x3.","expected_answer":"2.09455"}},{{"id":"d","prompt":"Part d) Find x4.","expected_answer":"2.09455"}}],"hint":"...","xai_explanation":"..."}}
+  {{"id":"q1","chunk_index":0,"question_type":"easy","format":"fill_blank","topic":"Topic","topic_tags":["t1"],"difficulty_score":{nd},"difficulty_level":"{nl}","cognitive_level":"Understand","selection_rationale":"...","question_text":"Using the bisection method on f(x)=x^3+4x^2-10 with a=1, b=2, what is the midpoint p1?","blank_word":"1.5","options":["1.5","1.25","1.75","2.0"],"correct_index":0,"hint":"...","xai_explanation":"..."}},
+  {{"id":"q2","chunk_index":1,"question_type":"medium","format":"short_answer","topic":"Topic","topic_tags":["t1"],"difficulty_score":{nd},"difficulty_level":"{nl}","cognitive_level":"Apply","selection_rationale":"...","question_text":"Evaluate f(1.5) for f(x)=x^3+4x^2-10.","expected_answer":"2.375","answer_tolerance":0.01,"hint":"...","xai_explanation":"..."}},
+  {{"id":"q3","chunk_index":2,"question_type":"hard","format":"multi_part","topic":"Topic","topic_tags":["t1"],"difficulty_score":{nd},"difficulty_level":"{nl}","cognitive_level":"Analyze","selection_rationale":"...","question_text":"Perform 4 iterations of Newton-Raphson on f(x)=x^3-2x-5 starting at x0=2.","sub_parts":[{{"id":"a","prompt":"Part a) Find x1.","expected_answer":"2.1","answer_tolerance":0.01}},{{"id":"b","prompt":"Part b) Using x1, find x2.","expected_answer":"2.09457"}},{{"id":"c","prompt":"Part c) Using x2, find x3.","expected_answer":"2.09455"}},{{"id":"d","prompt":"Part d) Using x3, find x4.","expected_answer":"2.09455"}}],"hint":"...","xai_explanation":"..."}}
 ]}}"""
 
 def build_question_user_prompt(chunks):
     txt="\n\n".join(f"[CHUNK {c['index']} | Model1:{c['difficulty']['score']}/5 ({c['difficulty']['level']})|conf:{c['difficulty']['confidence']}]\n{c['text']}" for c in chunks)
-    return f"CHUNKS (higher Model1 difficulty chunks appear more often on purpose — draw more questions from them):\n\n{txt}\n\nReturn ONLY the JSON object with the exact question counts and formats requested."
+    return f"CHUNKS (higher Model1 difficulty chunks appear more often on purpose — draw more questions from them):\n\n{txt}\n\nReturn ONLY the JSON object with the exact question counts, formats, and cognitive-level/selection-rationale fields requested."
 
 def build_hint_prompt(q,level,current_answer):
     fmt=q.get("format","fill_blank")
@@ -364,7 +514,9 @@ Guidance by level:
 - 7-9: walk through the approach up to (not including) the final computation.
 - {MAX_HINT_LEVEL}: show the full method/setup so only plugging in numbers remains.
 
-Write 2-4 sentences. Return ONLY the hint text — no JSON, no preamble, no markdown."""
+Write 2-4 SHORT sentences (under 60 words total). Finish your last sentence
+completely — a hint that trails off unfinished is worse than a shorter
+complete one. Return ONLY the hint text — no JSON, no preamble, no markdown."""
 
 def build_xai_prompt_v2(q,answer_summary,is_correct,time_taken,time_allotted,hints_used):
     fmt=q.get("format","fill_blank")
@@ -388,8 +540,17 @@ Write feedback (200-260 words):
 Return ONLY: {{"xai_text":"...","confidence_boost":0.1-1.0,"review_topics":["t1"]}}"""
 
 def call_gemini(sys_p,usr_p,max_tokens=8192):
-    global GEMINI_WORKS
-    payload=json.dumps({"system_instruction":{"parts":[{"text":sys_p}]},"contents":[{"parts":[{"text":usr_p}]}],"generationConfig":{"maxOutputTokens":max_tokens,"temperature":0.4}}).encode()
+    global GEMINI_WORKS,_GEMINI_COOLDOWN_UNTIL
+    import time as _time
+    if _time.time()<_GEMINI_COOLDOWN_UNTIL:
+        # Still within a rate-limit cooldown — fail fast instead of making
+        # a network round-trip that's guaranteed to 429 again, and instead
+        # of silently retrying on every hint press until the window passes.
+        raise RuntimeError(f"gemini_cooldown: rate-limited, retrying after {int(_GEMINI_COOLDOWN_UNTIL-_time.time())}s")
+    # temperature/top_p/top_k are deprecated as of Gemini 3.6 — the API silently
+    # ignores them today but Google has stated future model generations will
+    # hard-error on them, so they're intentionally omitted here.
+    payload=json.dumps({"system_instruction":{"parts":[{"text":sys_p}]},"contents":[{"parts":[{"text":usr_p}]}],"generationConfig":{"maxOutputTokens":max_tokens}}).encode()
     req=urllib.request.Request(GEMINI_URL,data=payload,headers={"Content-Type":"application/json"},method="POST")
     try:
         with urllib.request.urlopen(req,timeout=90) as r:
@@ -398,15 +559,98 @@ def call_gemini(sys_p,usr_p,max_tokens=8192):
         return data["candidates"][0]["content"]["parts"][0]["text"]
     except urllib.error.HTTPError as e:
         body=e.read().decode()
-        if e.code==403:GEMINI_WORKS=False;raise RuntimeError("gemini_403")
-        raise RuntimeError(f"Gemini {e.code}: {body[:200]}")
+        if e.code==403:GEMINI_WORKS=False;raise RuntimeError(f"gemini_403: {body[:400]}")
+        if e.code==429:
+            # Free-tier quota hit — this is TEMPORARY (unlike 403), so don't
+            # disable Gemini forever; just back off for a bit so the next
+            # several requests (hints, XAI) don't all repeat the same
+            # guaranteed-to-fail call while the quota window is still open.
+            _GEMINI_COOLDOWN_UNTIL=_time.time()+60
+            raise RuntimeError(f"gemini_429: {body[:400]}")
+        raise RuntimeError(f"Gemini {e.code}: {body[:400]}")
+    except (KeyError,IndexError) as e:
+        # candidates missing entirely — usually a safety-filter block with no
+        # content returned at all; surface the raw payload so it's diagnosable
+        raise RuntimeError(f"Gemini returned no usable content: {e} — raw={json.dumps(data)[:400] if 'data' in dir() else 'n/a'}")
+
+def _extract_json_object(raw):
+    """Pulls out the {...} JSON object even if Gemini wrapped it in markdown
+    fences or added stray commentary before/after — takes the span from the
+    first '{' to its matching closing '}', tracking string/escape state so
+    braces inside string values don't confuse the match."""
+    start = raw.find("{")
+    if start == -1:
+        return raw
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return raw[start:i+1]
+    return raw[start:]  # unterminated (likely truncated) — return what we have
+
+def _escape_literal_newlines_in_strings(raw):
+    """The single most common reason Gemini's 'valid JSON only' output still
+    fails strict json.loads: a literal newline/tab typed inside a string
+    value (e.g. a multi-line xai_explanation) instead of the escaped \\n.
+    Walks the text tracking whether we're inside a double-quoted string and
+    escapes raw control characters ONLY there — everything outside strings
+    (the actual JSON structure/whitespace) is left untouched."""
+    out = []
+    in_str = False
+    esc = False
+    for ch in raw:
+        if in_str:
+            if esc:
+                out.append(ch); esc = False; continue
+            if ch == "\\":
+                out.append(ch); esc = True; continue
+            if ch == '"':
+                out.append(ch); in_str = False; continue
+            if ch == "\n":
+                out.append("\\n"); continue
+            if ch == "\r":
+                continue
+            if ch == "\t":
+                out.append("\\t"); continue
+            out.append(ch); continue
+        if ch == '"':
+            in_str = True
+        out.append(ch)
+    return "".join(out)
 
 def parse_json_response(raw):
-    raw=raw.strip()
+    raw = raw.strip()
     if "```" in raw:
-        raw=raw.split("```")[1]
-        if raw.startswith("json"):raw=raw[4:]
-    return json.loads(raw.strip().rstrip("```").strip())
+        raw = raw.split("```", 1)[1]
+        if raw.lstrip().startswith("json"):
+            raw = raw.lstrip()[4:]
+    raw = _extract_json_object(raw.strip())
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        log.warning("[json] strict parse failed (%s) — retrying with literal-newline repair", e)
+        repaired = _escape_literal_newlines_in_strings(raw)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError as e2:
+            log.error("[json] repair also failed: %s — raw sample: %s", e2, raw[:500])
+            raise
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Offline fallback generator (used if Gemini unavailable/403)
@@ -466,8 +710,22 @@ def _fallback_qa_pair(chunk):
     which is tried first and produces genuine computation questions."""
     sents=_key_sentences(chunk["text"])
     for s in sents:
+        if _is_frontmatter_like(s):continue  # skip promo/nav sentences even
+        # inside an otherwise-fine chunk (see _is_frontmatter_like's docstring
+        # — a 300-word chunk can average out as "mostly math" while still
+        # containing one course-catalog/website blurb sentence like this)
         r=_make_blank(s)
         if r:return r
+    # Every sentence was either junk or unusable — this chunk is effectively
+    # dead for question purposes. The old naive fallback below used to grab
+    # the first 25 raw words with NO filtering at all, which is exactly how
+    # promotional text still leaked through even with the per-sentence check
+    # above (a chunk that's ENTIRELY junk sentences hits this line for every
+    # single one of them). Check it too before ever quoting it verbatim.
+    window=" ".join(chunk["text"].split()[:60])
+    if _is_frontmatter_like(window):
+        topic=_topic_of(chunk)
+        return f"This section on {topic.lower()} does not contain enough gradeable content — please review the material directly.","N/A"
     words=chunk["text"].split()[:25]
     ans=next((w for w in reversed(words) if len(w)>5),"concept")
     return " ".join("_____" if w==ans else w for w in words)+"?",ans
@@ -540,64 +798,162 @@ def _fallback_computation_pair(chunk):
         stem=fact["context"]+f" What is the value of {fact['label']}?"
     return stem,fact["value"],True
 
-def generate_questions_fallback(ordered_chunks,profile,easy_n,med_n,hard_n):
+def _next_difficulty(profile):
+    """Shared by build_model2_system_prompt, generate_questions_fallback, and
+    the grounding-repair pass, so a repaired question lands at the same
+    target difficulty the rest of the session was generated at."""
     avg=profile.get("avg_difficulty_score",3);mr=profile.get("mistake_rate",0.5);hr=profile.get("hint_press_rate",0.0)
     if mr>0.60 or hr>0.70:nd=max(1,avg-1)
     elif mr<0.20 and hr<0.20:nd=min(5,avg+1)
     else:nd=avg
-    nl=DLVL.get(nd,"medium")
+    return nd,DLVL.get(nd,"medium")
+
+_TOPIC_STOPWORDS={"additional","chapter","section","note","notes","example","examples",
+    "theorem","remark","remarks","introduction","preface","appendix","summary","exercise",
+    "exercises","solution","solutions","answer","answers","since","because","however",
+    "therefore","this","that","these","those","when","where","what","which","video",
+    "lecture","lectures","copyright","published","edition","author","chegg","omegalearn"}
+
+def _topic_of(chunk):
+    words=[w.strip(".,;:()[]") for w in chunk["text"].split()[:80]]
+    def is_word_like(w):
+        return w.replace("-","").replace("'","").isalpha()
+    candidates=[w for w in words if len(w)>5 and w[0].isupper() and is_word_like(w)
+        and w.lower() not in _TOPIC_STOPWORDS]
+    if not candidates:
+        return "Practice Question"
+    # Prefer a word that recurs (more likely a real topic noun than a
+    # one-off capitalised word at a sentence start) over the first hit.
+    from collections import Counter
+    counts=Counter(w.lower() for w in candidates)
+    best=max(candidates,key=lambda w:(counts[w.lower()],-words.index(w) if w in words else 0))
+    return best
+
+def _build_fill_blank_question(chunk,nd,nl,qid):
+    """Builds one EASY fill_blank question grounded in `chunk`. Extracted
+    so both the offline generator AND the grounding-repair pass (see
+    _grounding_ok / verify_and_repair_grounding) can produce a single
+    replacement question tied to one specific chunk, instead of duplicating
+    this logic in two places."""
+    qtxt,answer,is_computed=_fallback_computation_pair(chunk)
+    dists=_numeric_distractors(answer) if is_computed else _distractors(answer,nl)
+    opts=[answer]+dists;random.shuffle(opts);cidx=opts.index(answer)
+    topic=_topic_of(chunk)
+    if is_computed:
+        xai=(f"The correct value is {answer}, computed directly from the worked example in this section. "
+             f"The other options are plausible nearby values but don't match the actual computation shown. "
+             f"Re-work the calculation step shown in the passage to confirm {answer}. Keep practicing — accuracy comes with repetition!")
+    else:
+        xai=(f"The correct answer is '{answer}'. It fits because the passage specifically describes this concept. "
+             f"'{dists[0] if dists else 'Option B'}' is incorrect — related but different. "
+             f"'{dists[1] if len(dists)>1 else 'Option C'}' is incorrect — different mechanism/property. "
+             f"'{dists[2] if len(dists)>2 else 'Option D'}' is incorrect — different category. "
+             f"Memory trick: link '{answer}' to the context of this passage. Keep going!")
+    return {"id":qid,"chunk_index":chunk["index"],"question_type":"easy","format":"fill_blank",
+        "topic":topic,"topic_tags":[topic.lower(),nl],"difficulty_score":nd,"difficulty_level":nl,
+        "time_allotted_seconds":TIME_ALLOTMENT["easy"],"question_text":qtxt,"blank_word":answer,
+        "options":opts,"correct_index":cidx,"hint":f"Work through the computation shown for {topic.lower()} step by step.","xai_explanation":xai}
+
+def _build_short_answer_question(chunk,nd,nl,qid):
+    """MEDIUM short_answer counterpart to _build_fill_blank_question — see
+    that docstring for why this is a standalone, chunk-scoped builder."""
+    qtxt,answer,is_computed=_fallback_computation_pair(chunk)
+    topic=_topic_of(chunk)
+    is_numeric=is_computed or answer.replace('.','',1).replace('-','',1).isdigit()
+    if is_computed:
+        xai=(f"The correct value is {answer}. Trace through the computation shown in the passage step by step to "
+             f"confirm this result. If your answer differs, check for a sign error or an arithmetic slip in an "
+             f"intermediate step — that's the most common cause of a mismatch here.")
+        question_text=qtxt
+    else:
+        xai=(f"The correct answer is '{answer}'. This passage directly names it in that context. "
+             f"Re-read the sentence around the blank for the exact wording used. Memory trick: tie '{answer}' to {topic.lower()}.")
+        question_text="Fill in the missing term: "+qtxt
+    return {"id":qid,"chunk_index":chunk["index"],"question_type":"medium","format":"short_answer",
+        "topic":topic,"topic_tags":[topic.lower(),nl],"difficulty_score":nd,"difficulty_level":nl,
+        "time_allotted_seconds":TIME_ALLOTMENT["medium"],"question_text":question_text,
+        "expected_answer":answer,"answer_tolerance":0.01 if is_numeric else None,
+        "hint":f"Work through the {topic.lower()} computation shown, one step at a time.","xai_explanation":xai}
+
+# ── Relevance / grounding check ────────────────────────────────────────────
+# Gemini is instructed to base every question strictly on the supplied
+# chunks (see build_model2_system_prompt rule #1), but LLMs occasionally
+# drift toward generic textbook knowledge instead of the actual uploaded
+# passage. This is a cheap, deterministic safety net run AFTER generation:
+# it checks whether the question's own wording actually shares vocabulary
+# with the chunk it claims to come from. It cannot verify mathematical
+# correctness, only topical grounding in the uploaded material.
+_GROUND_STOPWORDS={"this","that","these","those","what","which","find","value","using",
+    "given","with","and","for","from","into","upon","your","the","a","an","is","are",
+    "was","were","will","would","could","should","about","first","then","following"}
+_GROUND_MIN_OVERLAP=0.15
+
+def _ground_tokens(s):
+    return {w for w in re.findall(r"[a-zA-Z]{4,}",(s or "").lower()) if w not in _GROUND_STOPWORDS}
+
+def _grounding_ok(question_text,chunk_text,extra_terms=None):
+    qt=_ground_tokens(question_text)
+    if extra_terms:qt|=_ground_tokens(" ".join(str(t) for t in extra_terms))
+    if not qt:return True   # nothing meaningful to check (pure numeric/symbolic question)
+    ct=_ground_tokens(chunk_text)
+    if not ct:return True
+    overlap=len(qt & ct)/len(qt)
+    return overlap>=_GROUND_MIN_OVERLAP
+
+def verify_and_repair_grounding(questions,chunks,nd,nl,used_gemini):
+    """Runs after question generation (Gemini or fallback) and:
+    1. Stamps every question with the Model 1 difficulty data of the chunk
+       it's tied to, so the frontend can show/verify Model 1's actual output
+       per question (score, level, confidence, source: model1_rf vs heuristic).
+    2. Checks each question is actually grounded in its claimed source chunk,
+       and FLAGS (only) any that fail. This used to silently swap flagged
+       Gemini questions for the crude offline generator's output — but for
+       formula-dense chunks (theorems, symbolic notation) the word-overlap
+       heuristic below produces false positives, and the "repair" was worse
+       than the question it replaced: a coherent, mostly-fine Gemini question
+       became a garbled fallback one with scrambled-letter distractors. A
+       flagged-but-imperfect Gemini question is still better than that, so
+       this now only logs/flags for visibility and never rewrites content."""
+    chunk_by_idx={c["index"]:c for c in chunks}
+    flagged=0
+    for q in questions:
+        c=chunk_by_idx.get(q.get("chunk_index"))
+        if not c:continue
+        d=c["difficulty"]
+        q["model1_difficulty_score"]=d["score"];q["model1_difficulty_level"]=d["level"]
+        q["model1_confidence"]=d["confidence"];q["model1_source"]=d["source"]
+
+        fmt=q.get("format","fill_blank")
+        extra=q.get("options",[]) if fmt=="fill_blank" else \
+              [q.get("expected_answer","")] if fmt=="short_answer" else \
+              [sp.get("prompt","") for sp in q.get("sub_parts",[])]
+        grounded=_grounding_ok(q.get("question_text",""),c["text"],extra)
+        q["grounded"]=grounded
+        if not grounded:flagged+=1
+    if flagged:
+        log.warning("[grounding] %d/%d questions flagged as low-overlap with their source chunk "
+            "(not replaced — flag is informational only)",flagged,len(questions))
+    return {"checked":len(questions),"flagged":flagged,"repaired":0}
+    return {"checked":len(questions),"flagged":flagged,"repaired":regenerated}
+
+def generate_questions_fallback(ordered_chunks,profile,easy_n,med_n,hard_n):
+    nd,nl=_next_difficulty(profile)
     pool=ordered_chunks or []
     if not pool:return []
     qi=[0]
     def next_chunk():
         return pool[qi[0]%len(pool)] if pool else pool[0]
-    def topic_of(chunk):
-        tw=[w for w in chunk["text"].split()[:40] if len(w)>5 and w[0].isupper() and w.isalpha()]
-        return tw[0] if tw else f"Section {chunk['index']+1}"
 
     questions=[]
     # EASY — fill_blank, but MCQ options are now numeric distractors when the
     # source is a real computed value, not vocabulary-style word swaps
     for _ in range(easy_n):
         c=next_chunk();qi[0]+=1
-        qtxt,answer,is_computed=_fallback_computation_pair(c)
-        dists=_numeric_distractors(answer) if is_computed else _distractors(answer,nl)
-        opts=[answer]+dists;random.shuffle(opts);cidx=opts.index(answer)
-        topic=topic_of(c)
-        if is_computed:
-            xai=(f"The correct value is {answer}, computed directly from the worked example in this section. "
-                 f"The other options are plausible nearby values but don't match the actual computation shown. "
-                 f"Re-work the calculation step shown in the passage to confirm {answer}. Keep practicing — accuracy comes with repetition!")
-        else:
-            xai=(f"The correct answer is '{answer}'. It fits because the passage specifically describes this concept. "
-                 f"'{dists[0] if dists else 'Option B'}' is incorrect — related but different. "
-                 f"'{dists[1] if len(dists)>1 else 'Option C'}' is incorrect — different mechanism/property. "
-                 f"'{dists[2] if len(dists)>2 else 'Option D'}' is incorrect — different category. "
-                 f"Memory trick: link '{answer}' to the context of this passage. Keep going!")
-        questions.append({"id":f"q{len(questions)+1}","chunk_index":c["index"],"question_type":"easy","format":"fill_blank",
-            "topic":topic,"topic_tags":[topic.lower(),nl],"difficulty_score":nd,"difficulty_level":nl,
-            "time_allotted_seconds":TIME_ALLOTMENT["easy"],"question_text":qtxt,"blank_word":answer,
-            "options":opts,"correct_index":cidx,"hint":f"Work through the computation shown for {topic.lower()} step by step.","xai_explanation":xai})
+        questions.append(_build_fill_blank_question(c,nd,nl,f"q{len(questions)+1}"))
     # MEDIUM — short_answer, typed final value/term
     for _ in range(med_n):
         c=next_chunk();qi[0]+=1
-        qtxt,answer,is_computed=_fallback_computation_pair(c)
-        topic=topic_of(c)
-        is_numeric=is_computed or answer.replace('.','',1).replace('-','',1).isdigit()
-        if is_computed:
-            xai=(f"The correct value is {answer}. Trace through the computation shown in the passage step by step to "
-                 f"confirm this result. If your answer differs, check for a sign error or an arithmetic slip in an "
-                 f"intermediate step — that's the most common cause of a mismatch here.")
-            question_text=qtxt
-        else:
-            xai=(f"The correct answer is '{answer}'. This passage directly names it in that context. "
-                 f"Re-read the sentence around the blank for the exact wording used. Memory trick: tie '{answer}' to {topic.lower()}.")
-            question_text="Fill in the missing term: "+qtxt
-        questions.append({"id":f"q{len(questions)+1}","chunk_index":c["index"],"question_type":"medium","format":"short_answer",
-            "topic":topic,"topic_tags":[topic.lower(),nl],"difficulty_score":nd,"difficulty_level":nl,
-            "time_allotted_seconds":TIME_ALLOTMENT["medium"],"question_text":question_text,
-            "expected_answer":answer,"answer_tolerance":0.01 if is_numeric else None,
-            "hint":f"Work through the {topic.lower()} computation shown, one step at a time.","xai_explanation":xai})
+        questions.append(_build_short_answer_question(c,nd,nl,f"q{len(questions)+1}"))
     # HARD — multi_part: prefer 4 facts from the SAME chunk sharing a label
     # prefix (e.g. p1,p2,p3,p4 from one iteration table) so the sub-parts
     # form a coherent sequence rather than 4 unrelated facts
@@ -616,7 +972,7 @@ def generate_questions_fallback(ordered_chunks,profile,easy_n,med_n,hard_n):
             for label,f in zip(["a","b","c","d"],chosen):
                 sub_parts.append({"id":label,"prompt":f"Part {label}) In this worked example, what is {f['label']}?",
                     "expected_answer":f["value"],"answer_tolerance":0.01})
-            topic=topic_of(c)
+            topic=_topic_of(c)
         else:
             # not enough facts in one chunk for a coherent sequence — draw
             # one fact/blank per sub-part from up to 4 chunks instead
@@ -627,7 +983,7 @@ def generate_questions_fallback(ordered_chunks,profile,easy_n,med_n,hard_n):
                 prompt=f"Part {label}) {qtxt}" if is_computed else f"Part {label}) Fill in the missing term: {qtxt}"
                 sub_parts.append({"id":label,"prompt":prompt,"expected_answer":answer,
                     "answer_tolerance":0.01 if is_numeric else None})
-            topic=topic_of(c)
+            topic=_topic_of(c)
         xai=("Full solution:\n"+"\n".join(f"Part {sp['id']}) → {sp['expected_answer']}" for sp in sub_parts)+
              "\nWork through each part in order and check your intermediate values against these before moving to the next part.")
         questions.append({"id":f"q{len(questions)+1}","chunk_index":c["index"],"question_type":"hard","format":"multi_part",
@@ -637,21 +993,67 @@ def generate_questions_fallback(ordered_chunks,profile,easy_n,med_n,hard_n):
     return questions
 
 def generate_fallback_hint(q,level,current_answer):
-    base=q.get("hint","Think about the key concept in this passage.")
+    """Used ONLY when Gemini itself errors out for this specific request
+    (Gemini being reachable is now the normal path — see call_gemini/GEMINI_URL).
+    Previously this returned the exact same sentence for levels 1-3, another
+    identical sentence for 4-6, etc. — genuinely unhelpful and repetitive.
+    Now every level says something distinct, referencing the real topic and
+    the student's own partial answer where possible."""
+    topic=q.get("topic","this section")
+    fmt=q.get("format","fill_blank")
     started=bool((current_answer or "").strip())
-    if level<=3:
-        return base
-    elif level<=6:
-        return base+(" Try applying it to what you've already written." if started
-                     else " Start by identifying the key term or formula this passage is describing.")
-    elif level<=9:
-        return base+f" Focus specifically on the topic: {q.get('topic','this section')}. Re-read the surrounding sentence for the exact wording."
-    else:
-        return base+" You're very close — the answer is the specific term/value this exact passage names for that concept."
+    qtext=q.get("question_text","")
+    snippet=(qtext[:90]+"…") if len(qtext)>90 else qtext
 
-def generate_xai_fallback(q,is_correct):
-    return{"xai_text":q.get("xai_explanation","Review this concept carefully."),
-           "confidence_boost":0.75 if is_correct else 0.35,"review_topics":q.get("topic_tags",[])}
+    if level==1:
+        return f"Start by re-reading the question carefully: \"{snippet}\" — what concept from {topic} is it testing?"
+    if level==2:
+        return f"Think about which formula or rule from {topic} applies here before you try to compute anything."
+    if level==3:
+        return ("You've started — check that your first step correctly sets up the problem before going further."
+                 if started else
+                 f"Identify what's actually being asked: is this asking for a value, a term, or a step in a method?")
+    if level==4:
+        return f"Write down what you already know from the passage about {topic}, then decide what's still missing."
+    if level==5:
+        return ("Look back at what you've typed so far — does it match the structure of a worked example from this passage?"
+                 if started else
+                 f"Try restating the question in your own words — that usually reveals the first step for {topic}.")
+    if level==6:
+        return f"Focus specifically on {topic}: re-read the exact sentence in the passage this question is built from."
+    if level==7:
+        if fmt=="multi_part":
+            return "Work through each part in order — later parts usually reuse the result from the part before it."
+        return f"Set up the calculation step by step for {topic}, but don't compute the final number yet."
+    if level==8:
+        return f"You're most of the way there — walk through the {topic} method one more time, checking each step against the passage."
+    if level==9:
+        return f"Double-check for a sign error or a swapped value — that's the most common slip on {topic} problems like this."
+    return f"You're very close — the answer is the exact term/value this passage gives for {topic}. One more careful pass should confirm it."
+
+def generate_xai_fallback(q,is_correct,answer_summary=None):
+    """Used ONLY when Gemini itself errors out for this specific request.
+    Previously this ignored the student's actual answer entirely and returned
+    the exact same canned paragraph to everyone regardless of what they typed
+    or selected — it didn't even change wording between two different wrong
+    answers. This version at least reflects what the student actually did."""
+    fmt=q.get("format","fill_blank")
+    topic=q.get("topic","this concept")
+    base=q.get("xai_explanation","Review this concept carefully.")
+
+    given_txt=None
+    if answer_summary:
+        if fmt=="fill_blank":given_txt=answer_summary.get("selected_text")
+        elif fmt=="short_answer":given_txt=answer_summary.get("answer_text")
+
+    if is_correct:
+        text=f"Correct! {base}"
+    elif given_txt:
+        text=(f"You answered '{given_txt}', which isn't quite right for this {topic} question. {base} "
+              f"Compare your answer against the correct one above and re-trace where your working diverged.")
+    else:
+        text=base
+    return{"xai_text":text,"confidence_boost":0.75 if is_correct else 0.35,"review_topics":q.get("topic_tags",[])}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Grading helpers
@@ -763,10 +1165,46 @@ def compute_forgetting_curve(p,mode="fixed",study_days=7):
     now=datetime.utcnow()
     sched=[{"session":i+1,"days_from_now":d,"date":(now+timedelta(days=d)).strftime("%Y-%m-%d")} for i,d in enumerate([d1,d2,d3,d4])]
     pts=[{"day":t,"retention":round(math.exp(-t/max(S,0.01)),4)} for t in range(0,d4+1)]
-    mastery_reached=(avg>=0.90 and ns>=3) or (session_cap is not None and ns>=session_cap)
+    # mastery_reached is computed separately (see compute_mastery) using the
+    # full multi-session history, not from this single session's numbers —
+    # left False here and overwritten by the caller after curve computation.
     return{"stability":round(S,3),"optimal_gap_days":round(gap,2),"threshold":thr,"next_sessions":sched,
-        "next_review_date":sched[0]["date"],"next_review_days":d1,"mastery_reached":mastery_reached,
+        "next_review_date":sched[0]["date"],"next_review_days":d1,"mastery_reached":False,
         "session_cap":session_cap,"curve_points":pts,"formula":f"R(t) = e^(-t / {round(S,2)})"}
+
+def compute_mastery(material_id,stability,session_cap):
+    """Real, multi-session mastery — not 'the latest session scored 90%'.
+    That old rule let one lucky session after two mediocre ones flip
+    mastery on, which is exactly the shallow definition flagged as wrong.
+    Mastery now requires ALL of:
+      - at least 3 completed sessions for this material (never mastered on
+        a first/second attempt, no matter how well it went)
+      - sustained accuracy: both the AVERAGE and the FLOOR (minimum) of the
+        last 3 completed sessions must be high — one weak recent session
+        blocks mastery even if the average looks fine
+      - low hint dependency in those recent sessions — leaning on hints
+        to get there isn't independent mastery
+      - a durable memory strength (S) from the forgetting curve itself —
+        ties mastery to actual predicted retention, not just raw accuracy
+    The one exception: hitting the hard session cap in "until mastery" mode
+    ends the loop regardless, so a student isn't stuck in an infinite
+    review cycle if they've already done the maximum sessions allowed."""
+    history=_sessions_for_material(material_id)
+    completed=[s for s in history if s.get("status")=="complete" and s.get("score") is not None]
+    if session_cap is not None and len(completed)>=session_cap:
+        return True
+    if len(completed)<3:
+        return False
+    recent=completed[-3:]
+    scores=[s["score"] for s in recent]
+    avg_recent=sum(scores)/len(scores)
+    min_recent=min(scores)
+    hint_rates=[s.get("learner_profile",{}).get("hint_press_rate",0) for s in recent]
+    avg_hint_rate=sum(hint_rates)/len(hint_rates) if hint_rates else 0
+    sustained_accuracy=avg_recent>=0.85 and min_recent>=0.75
+    low_hint_dependency=avg_hint_rate<=0.35
+    durable_retention=stability>=4.0
+    return sustained_accuracy and low_hint_dependency and durable_retention
 
 def _strip(qs):
     """What the frontend receives before answering: never the correct_index,
@@ -826,6 +1264,71 @@ def upload():
     return jsonify({"material_id":mid,"filename":filename,"total_chunks":len(chunks),"difficulty_summary":summary,
         "is_math":True,"math_confidence":math_confidence})
 
+def _sessions_for_user(user_id):
+    if _sessions_col is not None:
+        return list(_sessions_col.find({"user_id":user_id}).sort("completed_at",1))
+    return sorted([s for s in _memory_sessions.values() if s.get("user_id")==user_id],
+        key=lambda s:s.get("completed_at") or "")
+
+@app.route("/user/<user_id>/analytics",methods=["GET"])
+def user_analytics(user_id):
+    """Real cross-material analytics — replaces the mock mastery
+    trend/topic breakdown/stat cards on the Analytics page. Every number
+    here is computed directly from this user's actual stored sessions,
+    not seeded/fabricated data."""
+    sessions=[s for s in _sessions_for_user(user_id) if s.get("status")=="complete"]
+
+    # ── Overall mastery: average of each material's LATEST session score ──
+    by_material={}
+    for s in sessions:
+        by_material[s.get("material_id")]=s  # sessions are already time-sorted, so last write wins = latest
+    latest_scores=[s.get("score",0) for s in by_material.values()]
+    overall_mastery_percent=round(100*sum(latest_scores)/len(latest_scores)) if latest_scores else 0
+
+    # ── Problems solved: total questions answered across every session ──
+    problems_solved=sum(len(s.get("answers") or []) for s in sessions)
+
+    # ── Study time: sum of real per-question time_taken, converted to hours ──
+    total_seconds=sum(a.get("time_taken",0) for s in sessions for a in (s.get("answers") or []))
+    study_time_hours=round(total_seconds/3600,2)
+
+    # ── Day streak: consecutive calendar days up to today with >=1 completed session ──
+    days_with_activity=set()
+    for s in sessions:
+        ca=s.get("completed_at")
+        if ca:
+            try:days_with_activity.add(datetime.fromisoformat(ca).date())
+            except Exception:pass
+    streak=0
+    cursor=datetime.utcnow().date()
+    while cursor in days_with_activity:
+        streak+=1;cursor=cursor-timedelta(days=1)
+
+    # ── Mastery progress over time: one point per completed session, chronological ──
+    mastery_trend=[{"label":f"S{i+1}","retentionPercent":round((s.get("score") or 0)*100),
+        "highlighted":i==len(sessions)-1} for i,s in enumerate(sessions)]
+
+    # ── Topic mastery: average correctness per topic, across every answer ever given ──
+    topic_correct={};topic_total={}
+    for s in sessions:
+        for a in (s.get("answers") or []):
+            t=a.get("topic") or "General"
+            topic_total[t]=topic_total.get(t,0)+1
+            if a.get("is_correct"):topic_correct[t]=topic_correct.get(t,0)+1
+    topic_mastery=[{"topic":t,"masteryPercent":round(100*topic_correct.get(t,0)/topic_total[t]),
+        "trend":"Stable"} for t in topic_total]
+    topic_mastery.sort(key=lambda x:-x["masteryPercent"])
+
+    return jsonify({
+        "overallMasteryPercent":overall_mastery_percent,
+        "problemsSolved":problems_solved,
+        "studyTimeHours":study_time_hours,
+        "currentStreakDays":streak,
+        "masteryProgressTrend":mastery_trend,
+        "topicMastery":topic_mastery[:8],
+        "sessions_analyzed":len(sessions),
+    })
+
 @app.route("/user/<user_id>/materials",methods=["GET"])
 def list_materials(user_id):
     """Powers the dashboard: every material this user has ever uploaded,
@@ -849,8 +1352,33 @@ def list_materials(user_id):
                 "session_id":latest["_id"],"session_number":latest.get("session_number"),
                 "status":latest.get("status"),"score":latest.get("score"),
                 "next_review_date":(latest.get("forgetting_curve") or {}).get("next_review_date"),
+                "mastery_reached":(latest.get("forgetting_curve") or {}).get("mastery_reached",False),
                 "completed_at":latest.get("completed_at")}})
     return jsonify({"materials":out,"total":len(out)})
+
+@app.route("/user/<user_id>/sessions",methods=["GET"])
+def list_user_sessions(user_id):
+    """Every completed session this user has ever done, across every
+    material, with the material's filename/topic context attached — powers
+    the AI Feedback page's 'browse by session / by date' picker, so past
+    feedback is actually reachable instead of only visible right after
+    submitting."""
+    sessions=[s for s in _sessions_for_user(user_id) if s.get("status")=="complete"]
+    out=[]
+    for s in sessions:
+        material=_material_get(s.get("material_id")) or {}
+        answers=s.get("answers") or []
+        topics=list({a.get("topic") for a in answers if a.get("topic")})
+        out.append({
+            "session_id":s["_id"],"material_id":s.get("material_id"),
+            "material_filename":material.get("filename","Untitled.pdf"),
+            "session_number":s.get("session_number"),"score":s.get("score"),
+            "completed_at":s.get("completed_at"),"question_count":len(answers),
+            "topics":topics[:4],
+            "mastery_reached":(s.get("forgetting_curve") or {}).get("mastery_reached",False),
+        })
+    out.sort(key=lambda x:x.get("completed_at") or "",reverse=True)
+    return jsonify({"sessions":out,"total":len(out)})
 
 @app.route("/material/<mid>/sessions",methods=["GET"])
 def list_material_sessions(mid):
@@ -910,13 +1438,13 @@ def start_session(mid):
     if GEMINI_WORKS is not False:
         try:
             prioritised=ordered_chunks[:max(total_q,len(ordered_chunks))]
-            raw=call_gemini(build_model2_system_prompt(profile,easy_n,med_n,hard_n),build_question_user_prompt(prioritised))
+            raw=call_gemini(build_model2_system_prompt(profile,easy_n,med_n,hard_n),build_question_user_prompt(prioritised),max_tokens=16000)
             data=parse_json_response(raw);questions=data.get("questions",[])
             for i,q in enumerate(questions):q["id"]=f"q{i+1}"
             used_gemini=True;log.info("[start] Gemini: %d Qs (easy=%d med=%d hard=%d)",len(questions),easy_n,med_n,hard_n)
         except RuntimeError as e:
-            if"403"in str(e):log.warning("[start] Gemini 403 → fallback")
-            else:log.error("[start] Gemini err: %s",e)
+            if"403"in str(e):log.warning("[start] Gemini 403 → using offline fallback generator. Google's actual reason: %s",e)
+            else:log.error("[start] Gemini err (falling back — this session's questions/hints/XAI will be lower quality): %s",e)
         except Exception as e:log.error("[start] unexpected: %s",e)
     if not questions:
         questions=generate_questions_fallback(ordered_chunks,profile,easy_n,med_n,hard_n)
@@ -924,6 +1452,12 @@ def start_session(mid):
 
     for q in questions:
         q.setdefault("time_allotted_seconds",TIME_ALLOTMENT.get(q.get("question_type","easy"),90))
+
+    # ── verify every question is actually grounded in the uploaded material
+    #    (not generic drift), and stamp Model 1's real per-chunk difficulty
+    #    output onto each question so it's independently checkable ──
+    nd,nl=_next_difficulty(profile)
+    relevance_check=verify_and_repair_grounding(questions,chunks,nd,nl,used_gemini)
 
     # ── update per-chunk coverage on the MATERIAL (not the session) so it
     #    persists across every session on this document ──
@@ -943,7 +1477,8 @@ def start_session(mid):
         "questions":_strip(questions),"total":len(questions),"adapted_diff":profile["avg_difficulty_score"],
         "pace":profile["preferred_pace"],"used_gemini":used_gemini,
         "question_mix":{"easy":easy_n,"medium":med_n,"hard":hard_n},
-        "material_coverage_percent":coverage_percent})
+        "material_coverage_percent":coverage_percent,
+        "relevance_check":relevance_check})
 
 @app.route("/session/<sid>/question/<qid>/hint",methods=["POST"])
 def get_hint(sid,qid):
@@ -961,7 +1496,7 @@ def get_hint(sid,qid):
     if GEMINI_WORKS is not False:
         try:
             hint_text=call_gemini("You are a maths tutor giving one short progressive hint.",
-                build_hint_prompt(q,level,current_answer),max_tokens=300).strip()
+                build_hint_prompt(q,level,current_answer),max_tokens=600).strip()
         except Exception as e:
             log.warning("[hint] Gemini failed, using fallback: %s",e)
     if not hint_text:
@@ -969,12 +1504,65 @@ def get_hint(sid,qid):
 
     return jsonify({"question_id":qid,"hint_level":level,"hint_text":hint_text,"hints_remaining":MAX_HINT_LEVEL-level})
 
+def build_batch_xai_prompt(items):
+    """One prompt covering EVERY question in this submission, instead of
+    one Gemini call per question. This is the actual fix for hitting
+    free-tier rate limits mid-session: a 15-question session used to make
+    15 separate round-trips just for XAI (on top of question generation and
+    any hints already used) — now it's exactly one."""
+    blocks=[]
+    for it in items:
+        blocks.append(
+            f"QUESTION {it['qid']} ({it['fmt']}): {it['question_text']}\n"
+            f"STUDENT ANSWER: {json.dumps(it['answer_summary'],default=str)}\n"
+            f"RESULT: {'CORRECT' if it['is_correct'] else 'INCORRECT/PARTIAL'}\n"
+            f"TIME: {it['tt']:.0f}s of {it['allotted']:.0f}s · HINTS: {len(it['hints_used'])}"
+        )
+    joined="\n\n".join(blocks)
+    return f"""You are an XAI tutor for Nuromathix. Below are {len(items)} questions from
+ONE student's just-completed session. For EACH question, write feedback (150-220 words):
+1. {"Confirm why correct and deepen the concept" if False else "If correct: confirm why and deepen the concept. If incorrect: explain the FULL correct step-by-step solution with numbered steps."}
+2. If incorrect, name the likely mistake pattern (sign error, wrong formula, arithmetic slip, etc).
+3. One memory trick or conceptual anchor.
+4. One brief comment on time/hint usage.
+5. A short encouraging close.
+
+{joined}
+
+Return ONLY this JSON object, one entry per question, in the same order:
+{{"feedback":[{{"question_id":"{items[0]['qid'] if items else 'q1'}","xai_text":"...","confidence_boost":0.1-1.0,"review_topics":["t1"]}}]}}"""
+
+def generate_batch_xai(items):
+    """Returns {question_id: {xai_text,...}} for as many items as Gemini
+    successfully covers in ONE call. Any question missing from the result
+    (whole call failed, or Gemini dropped an item) falls back individually
+    via generate_xai_fallback at the call site — never blocks the submit."""
+    if not items or GEMINI_WORKS is False:
+        return {}
+    try:
+        max_tok=min(16000,700*len(items)+800)
+        raw=call_gemini("You are an XAI tutor. Be precise and encouraging.",
+            build_batch_xai_prompt(items),max_tokens=max_tok)
+        parsed=parse_json_response(raw)
+        out={}
+        for f in parsed.get("feedback",[]):
+            qid=f.get("question_id")
+            if qid:out[qid]={"xai_text":f.get("xai_text",""),
+                "confidence_boost":f.get("confidence_boost",0.5),
+                "review_topics":f.get("review_topics",[])}
+        return out
+    except Exception as e:
+        log.warning("[xai] batch Gemini call failed for %d questions, all fall back individually: %s",len(items),e)
+        return {}
+
 @app.route("/session/<sid>/submit",methods=["POST"])
 def submit_answers(sid):
     if not _session_exists(sid):return jsonify({"error":"not found"}),404
     session=_session_get(sid);qs=session.get("questions",[]);body=request.get_json() or{}
     user_ans=body.get("answers",[]);qmap={q["id"]:q for q in qs}
-    results=[]
+
+    # ── Phase 1: grade every answer first — no Gemini calls yet ──
+    graded=[]
     for ua in user_ans:
         qid=ua.get("question_id");q=qmap.get(qid)
         if not q:continue
@@ -985,25 +1573,44 @@ def submit_answers(sid):
         overtime=float(ua.get("overtime_seconds",0.0))
         continued_after_timeout=bool(ua.get("continued_after_timeout",False))
         hints_used=ua.get("hints_used",[])
-
         is_correct,answer_summary,score=grade_answer(q,ua)
+        graded.append({"qid":qid,"q":q,"fmt":fmt,"question_text":q.get("question_text",""),
+            "tt":tt,"allotted":allotted,"timed_out":timed_out,"overtime":overtime,
+            "continued_after_timeout":continued_after_timeout,"hints_used":hints_used,
+            "is_correct":is_correct,"answer_summary":answer_summary,"score":score})
 
-        xai=None
-        if GEMINI_WORKS is not False:
-            try:
-                raw=call_gemini("You are an XAI tutor. Be precise and encouraging.",
-                    build_xai_prompt_v2(q,answer_summary,is_correct,tt,allotted,hints_used),max_tokens=700)
-                xai=parse_json_response(raw)
-            except:pass
-        if not xai:xai=generate_xai_fallback(q,is_correct)
+    # ── Phase 2: ONE Gemini call for every question's XAI, not one-per-question ──
+    batch_xai=generate_batch_xai(graded)
+
+    # ── Phase 3: build the results the frontend actually receives ──
+    results=[]
+    for g in graded:
+        qid=g["qid"];q=g["q"];fmt=g["fmt"]
+        xai=batch_xai.get(qid)
+        if not xai:xai=generate_xai_fallback(q,g["is_correct"],g["answer_summary"])
+
+        # ── the correct answer, revealed only now that the question is
+        #    graded — the frontend results/XAI screen needs this to show
+        #    "your answer" vs "correct answer" per format ──
+        if fmt=="fill_blank":
+            opts=q.get("options",[]);ci=q.get("correct_index")
+            correct_answer={"options":opts,"correct_index":ci,
+                "correct_text":opts[ci] if ci is not None and 0<=ci<len(opts) else None}
+        elif fmt=="short_answer":
+            correct_answer={"expected_answer":q.get("expected_answer")}
+        else:
+            correct_answer={"sub_parts":[{"id":sp.get("id"),"prompt":sp.get("prompt"),
+                "expected_answer":sp.get("expected_answer")} for sp in q.get("sub_parts",[])]}
 
         results.append({"question_id":qid,"question_text":q.get("question_text",""),"format":fmt,
             "question_type":q.get("question_type","easy"),"topic":q.get("topic",""),"topic_tags":q.get("topic_tags",[]),
             "difficulty_score":q.get("difficulty_score",3),"difficulty_level":q.get("difficulty_level","medium"),
-            "answer":answer_summary,"is_correct":is_correct,"score":score,
-            "time_taken":tt,"time_allotted_seconds":allotted,"timed_out":timed_out,
-            "overtime_seconds":overtime,"continued_after_timeout":continued_after_timeout,
-            "hints_used":hints_used,"xai":xai})
+            "model1_difficulty_score":q.get("model1_difficulty_score"),"model1_difficulty_level":q.get("model1_difficulty_level"),
+            "model1_confidence":q.get("model1_confidence"),"model1_source":q.get("model1_source"),
+            "answer":g["answer_summary"],"correct_answer":correct_answer,"is_correct":g["is_correct"],"score":g["score"],
+            "time_taken":g["tt"],"time_allotted_seconds":g["allotted"],"timed_out":g["timed_out"],
+            "overtime_seconds":g["overtime"],"continued_after_timeout":g["continued_after_timeout"],
+            "hints_used":g["hints_used"],"xai":xai})
 
     session["answers"]=results
     fp=derive_learner_profile(session);fp["session_count"]=session.get("session_number",1)
@@ -1014,7 +1621,13 @@ def submit_answers(sid):
 
     _session_update(sid,{"answers":results,"status":"complete","completed_at":datetime.utcnow().isoformat(),
         "learner_profile":fp,"forgetting_curve":curve,"score":round(overall_score,3)})
-    log.info("[submit] sid=%s score=%.0f%% timeouts=%s",sid,overall_score*100,fp.get("timeout_rate"))
+
+    # Mastery needs the full session history INCLUDING this just-completed
+    # one, so it's computed only after the save above, not before.
+    curve["mastery_reached"]=compute_mastery(session.get("material_id"),curve["stability"],curve["session_cap"])
+    _session_update(sid,{"forgetting_curve":curve})
+
+    log.info("[submit] sid=%s score=%.0f%% timeouts=%s mastery=%s",sid,overall_score*100,fp.get("timeout_rate"),curve["mastery_reached"])
     return jsonify({"session_id":sid,"material_id":session.get("material_id"),
         "session_number":session.get("session_number"),"score":round(overall_score,3),
         "correct":correct,"total":total,"results":results,

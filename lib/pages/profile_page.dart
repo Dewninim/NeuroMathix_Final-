@@ -2,7 +2,9 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 // Profile & Settings Page - Tharuka Karunarathne
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import '../models/student_learning_models.dart';
+import '../theme/app_theme.dart';
 import '../widgets/student_app_shell.dart';
 
 class ProfilePage extends StatelessWidget {
@@ -204,7 +206,7 @@ class _SettingsContentState extends State<_SettingsContent> {
             Text(message),
           ],
         ),
-        backgroundColor: const Color(0xFF16A34A),
+        backgroundColor: AppColors.success,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         margin: const EdgeInsets.all(16),
@@ -338,7 +340,7 @@ class _SettingsContentState extends State<_SettingsContent> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
-        backgroundColor: const Color(0xFFDC2626),
+        backgroundColor: AppColors.error,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         margin: const EdgeInsets.all(16),
@@ -357,18 +359,18 @@ class _SettingsContentState extends State<_SettingsContent> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
+          Text(
             'Settings',
-            style: TextStyle(
+            style: GoogleFonts.dmSans(
               fontSize: 24,
               fontWeight: FontWeight.w800,
-              color: Color(0xFF111827),
+              color: AppColors.textDark,
             ),
           ),
           const SizedBox(height: 4),
-          const Text(
+          Text(
             'Manage your account and learning preferences',
-            style: TextStyle(color: Color(0xFF6B7280), fontSize: 14),
+            style: GoogleFonts.dmSans(color: AppColors.textMuted, fontSize: 14),
           ),
           const SizedBox(height: 28),
 
@@ -386,13 +388,13 @@ class _SettingsContentState extends State<_SettingsContent> {
                       width: 80,
                       height: 80,
                       decoration: BoxDecoration(
-                        color: const Color(0xFF1F4E95),
+                        color: AppColors.accent,
                         borderRadius: BorderRadius.circular(10),
                       ),
                       alignment: Alignment.center,
                       child: Text(
                         _initial,
-                        style: const TextStyle(
+                        style: GoogleFonts.dmSans(
                           color: Colors.white,
                           fontSize: 32,
                           fontWeight: FontWeight.w700,
@@ -406,17 +408,17 @@ class _SettingsContentState extends State<_SettingsContent> {
                         children: [
                           Text(
                             _displayName,
-                            style: const TextStyle(
+                            style: GoogleFonts.dmSans(
                               fontSize: 18,
                               fontWeight: FontWeight.w700,
-                              color: Color(0xFF111827),
+                              color: AppColors.textDark,
                             ),
                           ),
                           const SizedBox(height: 2),
                           Text(
                             _emailCtrl.text,
-                            style: const TextStyle(
-                              color: Color(0xFF6B7280),
+                            style: GoogleFonts.dmSans(
+                              color: AppColors.textMuted,
                               fontSize: 14,
                             ),
                           ),
@@ -432,8 +434,8 @@ class _SettingsContentState extends State<_SettingsContent> {
                             ),
                             child: Text(
                               _roleLabel,
-                              style: const TextStyle(
-                                color: Color(0xFF1F4E95),
+                              style: GoogleFonts.dmSans(
+                                color: AppColors.accent,
                                 fontSize: 12,
                                 fontWeight: FontWeight.w600,
                               ),
@@ -482,7 +484,7 @@ class _SettingsContentState extends State<_SettingsContent> {
                 ElevatedButton(
                   onPressed: _isSavingProfile ? null : _saveProfile,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF1F4E95),
+                    backgroundColor: AppColors.accent,
                     foregroundColor: Colors.white,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(8),
@@ -495,7 +497,7 @@ class _SettingsContentState extends State<_SettingsContent> {
                   ),
                   child: Text(
                     _isSavingProfile ? 'Saving...' : 'Save',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
+                    style: GoogleFonts.dmSans(fontWeight: FontWeight.w600),
                   ),
                 ),
               ],
@@ -701,7 +703,7 @@ class _SettingsContentState extends State<_SettingsContent> {
                 ElevatedButton(
                   onPressed: _isSavingPassword ? null : _updatePassword,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF1F4E95),
+                    backgroundColor: AppColors.accent,
                     foregroundColor: Colors.white,
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(8),
@@ -714,7 +716,7 @@ class _SettingsContentState extends State<_SettingsContent> {
                   ),
                   child: Text(
                     _isSavingPassword ? 'Updating...' : 'Update Password',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
+                    style: GoogleFonts.dmSans(fontWeight: FontWeight.w600),
                   ),
                 ),
               ],
@@ -737,7 +739,7 @@ class _SettingsContentState extends State<_SettingsContent> {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFE5E7EB)),
+        border: Border.all(color: AppColors.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -745,15 +747,15 @@ class _SettingsContentState extends State<_SettingsContent> {
           Row(
             children: [
               if (icon != null) ...[
-                Icon(icon, size: 18, color: const Color(0xFF6B7280)),
+                Icon(icon, size: 18, color: AppColors.textMuted),
                 const SizedBox(width: 8),
               ],
               Text(
                 title,
-                style: const TextStyle(
+                style: GoogleFonts.dmSans(
                   fontSize: 16,
                   fontWeight: FontWeight.w700,
-                  color: Color(0xFF111827),
+                  color: AppColors.textDark,
                 ),
               ),
             ],
@@ -774,9 +776,9 @@ class _SettingsContentState extends State<_SettingsContent> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFFF9FAFB),
+        color: AppColors.surface,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFFE5E7EB)),
+        border: Border.all(color: AppColors.border),
       ),
       child: Row(
         children: [
@@ -786,18 +788,18 @@ class _SettingsContentState extends State<_SettingsContent> {
               children: [
                 Text(
                   title,
-                  style: const TextStyle(
+                  style: GoogleFonts.dmSans(
                     fontWeight: FontWeight.w600,
                     fontSize: 14,
-                    color: Color(0xFF111827),
+                    color: AppColors.textDark,
                   ),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   subtitle,
-                  style: const TextStyle(
+                  style: GoogleFonts.dmSans(
                     fontSize: 12,
-                    color: Color(0xFF6B7280),
+                    color: AppColors.textMuted,
                   ),
                 ),
               ],
@@ -806,7 +808,7 @@ class _SettingsContentState extends State<_SettingsContent> {
           Switch(
             value: value,
             onChanged: onChanged,
-            activeColor: const Color(0xFF1F4E95),
+            activeColor: AppColors.accent,
           ),
         ],
       ),
@@ -816,7 +818,7 @@ class _SettingsContentState extends State<_SettingsContent> {
   Widget _label(String text) {
     return Text(
       text,
-      style: const TextStyle(
+      style: GoogleFonts.dmSans(
         color: Color(0xFF374151),
         fontWeight: FontWeight.w500,
         fontSize: 13,
@@ -835,7 +837,7 @@ class _SettingsContentState extends State<_SettingsContent> {
       controller: controller,
       obscureText: obscure,
       readOnly: readOnly,
-      style: const TextStyle(color: Color(0xFF111827), fontSize: 14),
+      style: GoogleFonts.dmSans(color: AppColors.textDark, fontSize: 14),
       decoration: InputDecoration(
         suffixIcon: onToggle != null
             ? IconButton(
@@ -845,13 +847,13 @@ class _SettingsContentState extends State<_SettingsContent> {
                   isVisible == true
                       ? Icons.visibility_off_outlined
                       : Icons.visibility_outlined,
-                  color: const Color(0xFF9CA3AF),
+                  color: AppColors.textFaint,
                   size: 18,
                 ),
               )
             : null,
         filled: true,
-        fillColor: readOnly ? const Color(0xFFF3F4F6) : Colors.white,
+        fillColor: readOnly ? AppColors.bgPage : Colors.white,
         contentPadding: const EdgeInsets.symmetric(
           horizontal: 12,
           vertical: 12,
@@ -866,7 +868,7 @@ class _SettingsContentState extends State<_SettingsContent> {
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
-          borderSide: const BorderSide(color: Color(0xFF1F4E95), width: 1.5),
+          borderSide: const BorderSide(color: AppColors.accent, width: 1.5),
         ),
       ),
     );

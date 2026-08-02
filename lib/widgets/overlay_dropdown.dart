@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import 'teacher_app_shell.dart';
 
@@ -145,7 +146,7 @@ class _OverlayDropdownItem extends StatelessWidget {
         ),
         child: Text(
           label,
-          style: const TextStyle(
+          style: GoogleFonts.dmSans(
             color: neuromathixText,
             fontWeight: FontWeight.w800,
             fontSize: 16,

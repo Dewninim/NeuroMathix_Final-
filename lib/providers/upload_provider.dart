@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:firebase_auth/firebase_auth.dart';
 import '../config/api_config.dart';
 
 // ── Upload state ──────────────────────────────────────────────────────────────
@@ -57,8 +58,8 @@ class UploadState {
 // ── UploadProvider (ChangeNotifier) ───────────────────────────────────────────
 // Talks to POST /upload on the Flask backend (see /backend/app.py). The
 // backend runs Model 1 (difficulty prediction) on the PDF and returns a
-// session_id that the quiz screen (learning_session_screen.dart) then uses
-// to fetch adaptive questions via /session/<id>/start.
+// material_id. We then call /material/<id>/session/start to actually create
+// a session and get a session_id, which the quiz screen needs.
 class UploadProvider extends ChangeNotifier {
   UploadState _state = const UploadState();
   UploadState get state => _state;
@@ -81,7 +82,12 @@ class UploadProvider extends ChangeNotifier {
 
     try {
       final uri = Uri.parse('$kApiBaseUrl/upload');
+      // Previously this never sent user_id at all, so the backend silently
+      // filed every upload under its default "anonymous" bucket — meaning
+      // /user/<uid>/materials could never find a real user's own uploads.
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'anonymous';
       final request = http.MultipartRequest('POST', uri)
+        ..fields['user_id'] = uid
         ..fields['study_days'] = (_state.learningDays ?? 7).toString()
         ..fields['mode'] = _state.studyMode == StudyMode.untilMastery
             ? 'until_mastery'
@@ -91,7 +97,11 @@ class UploadProvider extends ChangeNotifier {
       _state = _state.copyWith(progress: 0.55);
       notifyListeners();
 
-      final streamed = await request.send().timeout(const Duration(seconds: 60));
+      // 60s was too tight once OCR (real per-page cost, up to 20 pages) got
+      // added to upload processing — bumped to give large/scanned PDFs
+      // realistic headroom instead of the app timing out on a request the
+      // backend would have finished a bit later anyway.
+      final streamed = await request.send().timeout(const Duration(seconds: 180));
       final response = await http.Response.fromStream(streamed);
 
       if (response.statusCode != 200) {
@@ -100,10 +110,28 @@ class UploadProvider extends ChangeNotifier {
       }
 
       final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final materialId = data['material_id'] as String?;
+      if (materialId == null) {
+        throw Exception('Upload succeeded but no material_id was returned.');
+      }
+
+      // Also bumped — a real Gemini call generating ~15 rich questions can
+      // take longer than 60s, especially the first request in a session.
+      final sessionResp = await http
+          .post(Uri.parse('$kApiBaseUrl/material/$materialId/session/start'))
+          .timeout(const Duration(seconds: 120));
+
+      if (sessionResp.statusCode != 200) {
+        final body = _tryDecode(sessionResp.body);
+        throw Exception(body?['error'] ?? 'Could not start session (${sessionResp.statusCode})');
+      }
+
+      final sessionData = jsonDecode(sessionResp.body) as Map<String, dynamic>;
+
       _state = _state.copyWith(
         status: UploadStatus.success,
         progress: 1.0,
-        sessionId: data['session_id'] as String?,
+        sessionId: sessionData['session_id'] as String?,
         totalChunks: data['total_chunks'] as int?,
         difficultySummary: data['difficulty_summary'] as Map<String, dynamic>?,
       );
@@ -136,8 +164,8 @@ class UploadProvider extends ChangeNotifier {
   }
 
   /// Brief transition before navigating to the quiz screen. The quiz screen
-  /// itself calls POST /session/<id>/start to fetch adaptive questions, so
-  /// this just needs to confirm we have a session_id ready.
+  /// itself uses the session_id (already fetched during upload) to load
+  /// questions, so this just needs to confirm we have one ready.
   Future<void> startLearning() async {
     if (_state.sessionId == null) return;
     _state = _state.copyWith(starting: true);

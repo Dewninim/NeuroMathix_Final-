@@ -1,14 +1,20 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import '../models/student_learning_models.dart';
+import '../theme/app_theme.dart';
 
-const Color neuromathixNavy = Color(0xFF10345E);
-const Color neuromathixBlue = Color(0xFF1B63E8);
-const Color neuromathixText = Color(0xFF11131B);
-const Color neuromathixMuted = Color(0xFF687694);
-const Color neuromathixBorder = Color(0xFFE4E8F0);
-const Color neuromathixSurface = Color(0xFFF8FAFD);
+// Kept as aliases (not removed) so every other file that already imports
+// these names from here keeps compiling unchanged — they now just point at
+// the single shared palette in lib/theme/app_theme.dart instead of holding
+// their own separate values.
+const Color neuromathixNavy = AppColors.primary;
+const Color neuromathixBlue = AppColors.accent;
+const Color neuromathixText = AppColors.textDark;
+const Color neuromathixMuted = AppColors.textMuted;
+const Color neuromathixBorder = AppColors.border;
+const Color neuromathixSurface = AppColors.surface;
 
 String currentAuthUserName({String fallback = 'Student'}) {
   return authUserNameFrom(
@@ -83,7 +89,7 @@ class StudentAppShell extends StatelessWidget {
               centerTitle: false,
               title: Text(
                 'Hi, $resolvedUserName',
-                style: const TextStyle(fontWeight: FontWeight.w800),
+                style: GoogleFonts.dmSans(fontWeight: FontWeight.w800, color: AppColors.textDark),
               ),
               actions: [
                 NotificationBell(count: notificationCount),
@@ -152,12 +158,7 @@ class StudentTopBar extends StatelessWidget {
         children: [
           Text(
             'Hi, $userName',
-            style: const TextStyle(
-              fontSize: 28,
-              fontWeight: FontWeight.w800,
-              letterSpacing: 0,
-              color: neuromathixText,
-            ),
+            style: AppText.display,
           ),
           const Spacer(),
           NotificationBell(count: notificationCount),
@@ -244,10 +245,10 @@ class StudentSidebar extends StatelessWidget {
                   ),
                   if (expanded) ...[
                     const SizedBox(width: 12),
-                    const Expanded(
+                    Expanded(
                       child: Text(
                         'NEUROMATHIX',
-                        style: TextStyle(
+                        style: GoogleFonts.dmSans(
                           color: Colors.white,
                           fontWeight: FontWeight.w700,
                           letterSpacing: 0,
@@ -261,9 +262,9 @@ class StudentSidebar extends StatelessWidget {
             ),
             if (!expanded) ...[
               const SizedBox(height: 6),
-              const Text(
+              Text(
                 'NEUROMATHIX',
-                style: TextStyle(
+                style: GoogleFonts.dmSans(
                   color: Colors.white,
                   fontSize: 11,
                   letterSpacing: 0,
@@ -326,9 +327,10 @@ class _SidebarButton extends StatelessWidget {
             const SizedBox(width: 14),
             Text(
               item.label,
-              style: const TextStyle(
+              style: GoogleFonts.dmSans(
                 color: Colors.white,
                 fontWeight: FontWeight.w700,
+                fontSize: 14,
               ),
             ),
           ],
@@ -379,11 +381,12 @@ class _SidebarLogoutButton extends StatelessWidget {
           const Icon(Icons.logout_rounded, color: Colors.white, size: 26),
           if (expanded) ...[
             const SizedBox(width: 14),
-            const Text(
+            Text(
               'Logout',
-              style: TextStyle(
+              style: GoogleFonts.dmSans(
                 color: Colors.white,
                 fontWeight: FontWeight.w700,
+                fontSize: 14,
               ),
             ),
           ],
@@ -428,12 +431,12 @@ class NotificationBell extends StatelessWidget {
                 height: 26,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: Colors.red,
+                  color: AppColors.error,
                   borderRadius: BorderRadius.circular(16),
                 ),
                 child: Text(
                   '$count',
-                  style: const TextStyle(
+                  style: GoogleFonts.dmSans(
                     color: Colors.white,
                     fontWeight: FontWeight.w800,
                     fontSize: 16,
@@ -462,7 +465,7 @@ class UserInitialAvatar extends StatelessWidget {
       backgroundColor: const Color(0xFF0D315E),
       child: Text(
         initial,
-        style: const TextStyle(
+        style: GoogleFonts.dmSans(
           color: Colors.white,
           fontWeight: FontWeight.w800,
           fontSize: 26,
@@ -509,16 +512,13 @@ class SectionPlaceholder extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: const TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w800,
-                  ),
+                  style: AppText.display,
                 ),
                 const SizedBox(height: 10),
                 Text(
                   message,
-                  style: const TextStyle(
-                    color: neuromathixMuted,
+                  style: GoogleFonts.dmSans(
+                    color: AppColors.textMuted,
                     fontSize: 16,
                     height: 1.45,
                   ),

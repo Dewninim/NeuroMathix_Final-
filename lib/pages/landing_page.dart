@@ -1,6 +1,8 @@
 // Landing Page - Tharuka Karunarathne
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:video_player/video_player.dart';
+import '../theme/app_theme.dart';
 import '../widgets/brain_logo.dart';
 
 class LandingPage extends StatefulWidget {
@@ -85,12 +87,12 @@ class _LandingPageState extends State<LandingPage> {
                   children: [
                     Column(
                       mainAxisSize: MainAxisSize.min,
-                      children: const [
-                        BrainLogo(size: 36),
-                        SizedBox(height: 4),
+                      children: [
+                        const BrainLogo(size: 36),
+                        const SizedBox(height: 4),
                         Text(
                           'NEUROMATHIX',
-                          style: TextStyle(
+                          style: GoogleFonts.dmSans(
                             color: Colors.white,
                             fontSize: 9,
                             fontWeight: FontWeight.w700,
@@ -117,9 +119,9 @@ class _LandingPageState extends State<LandingPage> {
                             borderRadius: BorderRadius.circular(30),
                             border: Border.all(color: Colors.white, width: 1.5),
                           ),
-                          child: const Text(
+                          child: Text(
                             'Sign in',
-                            style: TextStyle(
+                            style: GoogleFonts.dmSans(
                               color: Colors.white,
                               fontWeight: FontWeight.w600,
                               fontSize: 15,
@@ -152,7 +154,7 @@ class _LandingPageState extends State<LandingPage> {
                         ),
                         child: Text(
                           'AI-Powered Personalized Learning',
-                          style: TextStyle(
+                          style: GoogleFonts.dmSans(
                             color: Colors.white.withValues(alpha: 0.90),
                             fontSize: 13,
                             fontWeight: FontWeight.w500,
@@ -160,10 +162,10 @@ class _LandingPageState extends State<LandingPage> {
                         ),
                       ),
                       const SizedBox(height: 28),
-                      const Text(
+                      Text(
                         'Smarter learning',
                         textAlign: TextAlign.center,
-                        style: TextStyle(
+                        style: GoogleFonts.dmSans(
                           color: Colors.white,
                           fontSize: 72,
                           fontWeight: FontWeight.w900,
@@ -174,7 +176,7 @@ class _LandingPageState extends State<LandingPage> {
                       Text(
                         'Lasting memory',
                         textAlign: TextAlign.center,
-                        style: TextStyle(
+                        style: GoogleFonts.dmSans(
                           color: Colors.white.withValues(alpha: 0.42),
                           fontSize: 72,
                           fontWeight: FontWeight.w900,
@@ -186,7 +188,7 @@ class _LandingPageState extends State<LandingPage> {
                       Text(
                         'Master mathematics with AI that adapts to your unique learning style,\npredicts what you\'ll forget, and helps you truly understand.',
                         textAlign: TextAlign.center,
-                        style: TextStyle(
+                        style: GoogleFonts.dmSans(
                           color: Colors.white.withValues(alpha: 0.80),
                           fontSize: 16,
                           height: 1.6,
@@ -212,16 +214,16 @@ class _LandingPageState extends State<LandingPage> {
                                 ),
                                 decoration: BoxDecoration(
                                   color: _getStartedHovered
-                                      ? const Color(0xFF1F4E95)
+                                      ? AppColors.accent
                                       : Colors.white,
                                   borderRadius: BorderRadius.circular(40),
                                 ),
                                 child: Text(
                                   'Get Started →',
-                                  style: TextStyle(
+                                  style: GoogleFonts.dmSans(
                                     color: _getStartedHovered
                                         ? Colors.white
-                                        : const Color(0xFF1F4E95),
+                                        : AppColors.accent,
                                     fontWeight: FontWeight.w800,
                                     fontSize: 16,
                                   ),
@@ -254,9 +256,9 @@ class _LandingPageState extends State<LandingPage> {
                                     width: 1.5,
                                   ),
                                 ),
-                                child: const Text(
+                                child: Text(
                                   'I have an account',
-                                  style: TextStyle(
+                                  style: GoogleFonts.dmSans(
                                     color: Colors.white,
                                     fontWeight: FontWeight.w600,
                                     fontSize: 16,
@@ -277,7 +279,7 @@ class _LandingPageState extends State<LandingPage> {
                 child: Text(
                   '© 2026 NeuroMathix. All rights reserved.',
                   textAlign: TextAlign.center,
-                  style: TextStyle(
+                  style: GoogleFonts.dmSans(
                     color: Colors.white.withValues(alpha: 0.50),
                     fontSize: 13,
                   ),

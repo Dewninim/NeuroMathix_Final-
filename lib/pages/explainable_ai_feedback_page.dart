@@ -1,21 +1,38 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:http/http.dart' as http;
 
+import '../config/api_config.dart';
 import '../models/student_learning_models.dart';
 import '../services/student_learning_service.dart';
+import '../theme/app_theme.dart';
 import '../widgets/student_app_shell.dart';
+import 'learning_session_screen.dart' show QuestionResult, buildRealAiFeedbackData;
 
 class ExplainableAiFeedbackPage extends StatelessWidget {
   final String? studentId;
   final String feedbackId;
   final StudentLearningService? service;
+  // When provided (e.g. navigated to from a just-submitted session), this
+  // is used directly instead of fetching from the mock
+  // FirestoreStudentLearningService — same page, same layout, real content
+  // built from that session's actual backend response.
+  final AiFeedbackData? initialData;
+  // When true (the default when reached from normal navigation, not from
+  // a just-submitted session), shows a picker over this student's REAL
+  // past sessions instead of jumping straight to one mock concept.
+  final bool browseSessions;
 
   const ExplainableAiFeedbackPage({
     super.key,
     this.studentId,
     this.feedbackId = 'memory-types',
     this.service,
+    this.initialData,
+    this.browseSessions = true,
   });
 
   StudentLearningService get _service =>
@@ -26,6 +43,24 @@ class ExplainableAiFeedbackPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (initialData != null) {
+      return StudentAppShell(
+        activeSection: StudentNavSection.aiFeedback,
+        userName: currentAuthUserName(),
+        notificationCount: 0,
+        onSectionSelected: (section) => _openSection(context, section),
+        child: _FeedbackContent(data: initialData!, service: _service),
+      );
+    }
+    if (browseSessions) {
+      return StudentAppShell(
+        activeSection: StudentNavSection.aiFeedback,
+        userName: currentAuthUserName(),
+        notificationCount: 0,
+        onSectionSelected: (section) => _openSection(context, section),
+        child: _SessionHistoryBrowser(studentId: _studentId, service: _service, feedbackId: feedbackId),
+      );
+    }
     return FutureBuilder<AiFeedbackData>(
       future: _service.getFeedbackForConcept(
         studentId: _studentId,
@@ -76,6 +111,229 @@ class ExplainableAiFeedbackPage extends StatelessWidget {
   }
 }
 
+/// Lists this student's REAL past sessions (from GET /user/<uid>/sessions)
+/// and lets them pick one to see its real, session-specific feedback —
+/// this is what makes the AI Feedback page update "according to sessions"
+/// instead of always showing one static mock concept. Falls back to the
+/// mock single-concept view only if the student genuinely has no session
+/// history yet (so the page still shows *something* on a first visit).
+class _SessionHistoryBrowser extends StatefulWidget {
+  final String studentId;
+  final StudentLearningService service;
+  final String feedbackId;
+  const _SessionHistoryBrowser({required this.studentId, required this.service, required this.feedbackId});
+
+  @override
+  State<_SessionHistoryBrowser> createState() => _SessionHistoryBrowserState();
+}
+
+class _SessionHistoryBrowserState extends State<_SessionHistoryBrowser> {
+  late Future<List<Map<String, dynamic>>> _historyFuture;
+  String? _selectedSessionId;
+  Future<AiFeedbackData>? _selectedFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _historyFuture = _fetchHistory();
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchHistory() async {
+    final r = await http
+        .get(Uri.parse('$kApiBaseUrl/user/${widget.studentId}/sessions'))
+        .timeout(const Duration(seconds: 20));
+    if (r.statusCode != 200) throw Exception('Could not load session history (${r.statusCode})');
+    final data = jsonDecode(r.body) as Map<String, dynamic>;
+    return (data['sessions'] as List? ?? []).cast<Map<String, dynamic>>();
+  }
+
+  // Fetches one session's full detail and normalizes it into the same
+  // shape buildRealAiFeedbackData already expects (the /submit response
+  // shape) — GET /session/<sid> uses slightly different key names
+  // ('answers' vs 'results', no top-level correct/total), so this bridges
+  // the two instead of duplicating the whole builder function.
+  Future<AiFeedbackData> _loadSession(String sessionId) async {
+    final r = await http
+        .get(Uri.parse('$kApiBaseUrl/session/$sessionId'))
+        .timeout(const Duration(seconds: 20));
+    if (r.statusCode != 200) throw Exception('Could not load session (${r.statusCode})');
+    final detail = jsonDecode(r.body) as Map<String, dynamic>;
+    final answersRaw = (detail['answers'] as List? ?? []).cast<Map<String, dynamic>>();
+    final results = answersRaw.map((a) => QuestionResult.fromJson(a)).toList();
+    final curve = detail['forgetting_curve'] as Map<String, dynamic>? ?? {};
+    final total = results.length;
+    final correct = results.where((r) => r.isCorrect).length;
+    final normalized = <String, dynamic>{
+      'session_id': detail['session_id'],
+      'score': detail['score'],
+      'correct': correct,
+      'total': total,
+      'results': answersRaw,
+      'forgetting_curve': curve,
+      'next_review_days': curve['next_review_days'],
+      'next_review_date': curve['next_review_date'],
+    };
+    return buildRealAiFeedbackData(normalized, results);
+  }
+
+  void _select(String sessionId) {
+    setState(() {
+      _selectedSessionId = sessionId;
+      _selectedFuture = _loadSession(sessionId);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_selectedSessionId != null) {
+      return FutureBuilder<AiFeedbackData>(
+        future: _selectedFuture,
+        builder: (context, snap) {
+          if (snap.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snap.hasError || snap.data == null) {
+            return _errorState('Could not load that session\'s feedback.', () => setState(() => _selectedSessionId = null));
+          }
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+                child: TextButton.icon(
+                  onPressed: () => setState(() => _selectedSessionId = null),
+                  icon: const Icon(Icons.arrow_back, size: 16),
+                  label: Text('All sessions', style: GoogleFonts.dmSans(fontWeight: FontWeight.w700)),
+                  style: TextButton.styleFrom(foregroundColor: neuromathixText),
+                ),
+              ),
+              Expanded(child: _FeedbackContent(data: snap.data!, service: widget.service)),
+            ],
+          );
+        },
+      );
+    }
+
+    return FutureBuilder<List<Map<String, dynamic>>>(
+      future: _historyFuture,
+      builder: (context, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final sessions = snap.data ?? [];
+        if (snap.hasError || sessions.isEmpty) {
+          // No real history yet — fall back to the mock single-concept view
+          // so the page still shows something meaningful on a first visit.
+          return FutureBuilder<AiFeedbackData>(
+            future: widget.service.getFeedbackForConcept(studentId: widget.studentId, feedbackId: widget.feedbackId),
+            builder: (context, mockSnap) {
+              if (mockSnap.data == null) return const Center(child: CircularProgressIndicator());
+              return _FeedbackContent(data: mockSnap.data!, service: widget.service);
+            },
+          );
+        }
+        return ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            Text('Your Session Feedback', style: GoogleFonts.dmSans(fontSize: 24, fontWeight: FontWeight.w900, color: neuromathixText)),
+            const SizedBox(height: 4),
+            Text('Pick a past session to see its real, detailed AI feedback.',
+                style: GoogleFonts.dmSans(fontSize: 14, color: neuromathixMuted)),
+            const SizedBox(height: 20),
+            ...sessions.map((s) => _SessionHistoryCard(session: s, onTap: () => _select(s['session_id'] as String))),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _errorState(String message, VoidCallback onBack) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(message, style: GoogleFonts.dmSans(color: neuromathixMuted)),
+          const SizedBox(height: 12),
+          TextButton(onPressed: onBack, child: const Text('Back')),
+        ],
+      ),
+    );
+  }
+}
+
+class _SessionHistoryCard extends StatelessWidget {
+  final Map<String, dynamic> session;
+  final VoidCallback onTap;
+  const _SessionHistoryCard({required this.session, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final score = ((session['score'] as num? ?? 0) * 100).round();
+    final filename = ((session['material_filename'] as String? ?? 'Untitled.pdf')).replaceAll('.pdf', '');
+    final completedAt = session['completed_at'] as String?;
+    String dateLabel = '';
+    if (completedAt != null) {
+      try {
+        final dt = DateTime.parse(completedAt);
+        dateLabel = '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
+      } catch (_) {}
+    }
+    final topics = (session['topics'] as List? ?? []).cast<String>();
+    final mastered = session['mastery_reached'] as bool? ?? false;
+    final scoreColor = score >= 70 ? const Color(0xFF45B86B) : const Color(0xFFFF7B22);
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: neuromathixBorder),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 48,
+              height: 48,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(color: scoreColor.withValues(alpha: 0.12), shape: BoxShape.circle),
+              child: Text('$score%', style: GoogleFonts.dmSans(color: scoreColor, fontWeight: FontWeight.w800, fontSize: 12)),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Flexible(child: Text(filename, style: GoogleFonts.dmSans(fontWeight: FontWeight.w700, color: neuromathixText), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                      if (mastered) ...[
+                        const SizedBox(width: 6),
+                        const Icon(Icons.workspace_premium, size: 14, color: Color(0xFFF59E0B)),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Session ${session['session_number']} · $dateLabel${topics.isNotEmpty ? ' · ${topics.join(', ')}' : ''}',
+                    style: GoogleFonts.dmSans(fontSize: 12, color: neuromathixMuted),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right, color: neuromathixMuted),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _FeedbackContent extends StatelessWidget {
   final AiFeedbackData data;
   final StudentLearningService service;
@@ -101,9 +359,9 @@ class _FeedbackContent extends StatelessWidget {
               const SizedBox(height: 24),
               _RetentionExplanationCard(data: data),
               const SizedBox(height: 34),
-              const Text(
+              Text(
                 'Key Factors Analysis',
-                style: TextStyle(
+                style: GoogleFonts.dmSans(
                   fontSize: 24,
                   fontWeight: FontWeight.w900,
                   color: neuromathixText,
@@ -147,37 +405,37 @@ class _Breadcrumbs extends StatelessWidget {
       spacing: 12,
       runSpacing: 8,
       children: [
-        const Text(
+        Text(
           'Home',
-          style: TextStyle(
+          style: GoogleFonts.dmSans(
             color: neuromathixMuted,
             fontWeight: FontWeight.w800,
           ),
         ),
-        const Text(
+        Text(
           '/',
-          style: TextStyle(
+          style: GoogleFonts.dmSans(
             color: neuromathixMuted,
             fontWeight: FontWeight.w800,
           ),
         ),
         Text(
           data.courseTitle,
-          style: const TextStyle(
+          style: GoogleFonts.dmSans(
             color: neuromathixMuted,
             fontWeight: FontWeight.w800,
           ),
         ),
-        const Text(
+        Text(
           '/',
-          style: TextStyle(
+          style: GoogleFonts.dmSans(
             color: neuromathixMuted,
             fontWeight: FontWeight.w800,
           ),
         ),
         Text(
           data.conceptTitle,
-          style: const TextStyle(
+          style: GoogleFonts.dmSans(
             color: neuromathixText,
             fontWeight: FontWeight.w900,
           ),
@@ -210,7 +468,7 @@ class _FeedbackHeader extends StatelessWidget {
               ),
               child: Text(
                 data.badgeLabel,
-                style: const TextStyle(
+                style: GoogleFonts.dmSans(
                   color: neuromathixBlue,
                   fontWeight: FontWeight.w900,
                   letterSpacing: 1.4,
@@ -221,7 +479,7 @@ class _FeedbackHeader extends StatelessWidget {
             const SizedBox(height: 10),
             Text(
               data.headline,
-              style: const TextStyle(
+              style: GoogleFonts.dmSans(
                 fontSize: 36,
                 fontWeight: FontWeight.w900,
                 color: neuromathixText,
@@ -232,7 +490,7 @@ class _FeedbackHeader extends StatelessWidget {
               constraints: const BoxConstraints(maxWidth: 760),
               child: Text(
                 data.summary,
-                style: const TextStyle(
+                style: GoogleFonts.dmSans(
                   fontSize: 17,
                   color: neuromathixMuted,
                   height: 1.35,
@@ -268,7 +526,7 @@ class _FeedbackHeader extends StatelessWidget {
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(8),
                 ),
-                textStyle: const TextStyle(fontWeight: FontWeight.w900),
+                textStyle: GoogleFonts.dmSans(fontWeight: FontWeight.w900),
               ),
             ),
           ],
@@ -337,9 +595,9 @@ class _RetentionSummary extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
+        Text(
           'CURRENT RETENTION',
-          style: TextStyle(
+          style: GoogleFonts.dmSans(
             color: neuromathixMuted,
             fontSize: 16,
             fontWeight: FontWeight.w900,
@@ -354,7 +612,7 @@ class _RetentionSummary extends StatelessWidget {
           children: [
             Text(
               '${data.currentRetentionPercent}%',
-              style: const TextStyle(
+              style: GoogleFonts.dmSans(
                 fontSize: 48,
                 fontWeight: FontWeight.w900,
                 color: neuromathixText,
@@ -362,7 +620,7 @@ class _RetentionSummary extends StatelessWidget {
             ),
             Text(
               '↓${data.declinePercent}% decline',
-              style: const TextStyle(
+              style: GoogleFonts.dmSans(
                 color: Color(0xFFFF414D),
                 fontSize: 16,
                 fontWeight: FontWeight.w900,
@@ -373,7 +631,7 @@ class _RetentionSummary extends StatelessWidget {
         const SizedBox(height: 10),
         Text(
           data.retentionDescription,
-          style: const TextStyle(
+          style: GoogleFonts.dmSans(
             color: neuromathixMuted,
             fontSize: 15,
             height: 1.35,
@@ -403,9 +661,9 @@ class _RetentionSummary extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
+                    Text(
                       'Optimal Review Window',
-                      style: TextStyle(
+                      style: GoogleFonts.dmSans(
                         fontSize: 17,
                         fontWeight: FontWeight.w900,
                         color: neuromathixText,
@@ -414,7 +672,7 @@ class _RetentionSummary extends StatelessWidget {
                     const SizedBox(height: 16),
                     Text.rich(
                       TextSpan(
-                        style: const TextStyle(
+                        style: GoogleFonts.dmSans(
                           color: neuromathixMuted,
                           fontSize: 15,
                           height: 1.35,
@@ -427,7 +685,7 @@ class _RetentionSummary extends StatelessWidget {
                           ),
                           TextSpan(
                             text: '${data.recoveryRetentionPercent}%',
-                            style: const TextStyle(
+                            style: GoogleFonts.dmSans(
                               color: neuromathixBlue,
                               fontWeight: FontWeight.w900,
                             ),
@@ -610,9 +868,9 @@ class _ForgettingCurvePainter extends CustomPainter {
     canvas.drawPath(triangle, Paint()..color = neuromathixBlue);
 
     final textPainter = TextPainter(
-      text: const TextSpan(
+      text: TextSpan(
         text: 'YOU ARE HERE',
-        style: TextStyle(
+        style: GoogleFonts.dmSans(
           color: Colors.white,
           fontWeight: FontWeight.w900,
           fontSize: 14,
@@ -631,9 +889,9 @@ class _ForgettingCurvePainter extends CustomPainter {
     final y = 2.0;
     final right = size.width - 8;
 
-    textPainter.text = const TextSpan(
+    textPainter.text = TextSpan(
       text: 'Ideal',
-      style: TextStyle(
+      style: GoogleFonts.dmSans(
         color: neuromathixMuted,
         fontSize: 12,
         fontWeight: FontWeight.w700,
@@ -648,9 +906,9 @@ class _ForgettingCurvePainter extends CustomPainter {
     );
 
     final idealStart = right - textPainter.width - 56;
-    textPainter.text = const TextSpan(
+    textPainter.text = TextSpan(
       text: 'Predicted',
-      style: TextStyle(
+      style: GoogleFonts.dmSans(
         color: neuromathixMuted,
         fontSize: 12,
         fontWeight: FontWeight.w700,
@@ -680,7 +938,7 @@ class _ForgettingCurvePainter extends CustomPainter {
       final offset = pointFor(point, 0);
       textPainter.text = TextSpan(
         text: point.label,
-        style: TextStyle(
+        style: GoogleFonts.dmSans(
           color: point.isCurrent ? neuromathixBlue : neuromathixMuted,
           fontSize: 13,
           fontWeight: FontWeight.w900,
@@ -775,7 +1033,7 @@ class _FactorCard extends StatelessWidget {
             const SizedBox(height: 22),
             Text(
               factor.title,
-              style: const TextStyle(
+              style: GoogleFonts.dmSans(
                 color: neuromathixMuted,
                 fontSize: 15,
                 fontWeight: FontWeight.w800,
@@ -784,7 +1042,7 @@ class _FactorCard extends StatelessWidget {
             const SizedBox(height: 4),
             Text(
               factor.value,
-              style: const TextStyle(
+              style: GoogleFonts.dmSans(
                 color: neuromathixText,
                 fontSize: 20,
                 fontWeight: FontWeight.w900,
@@ -793,7 +1051,7 @@ class _FactorCard extends StatelessWidget {
             const SizedBox(height: 16),
             Text(
               factor.description,
-              style: const TextStyle(
+              style: GoogleFonts.dmSans(
                 color: neuromathixMuted,
                 fontSize: 15,
                 height: 1.38,
@@ -839,7 +1097,7 @@ class _GuidanceCard extends StatelessWidget {
               children: [
                 Text(
                   data.guidanceTitle,
-                  style: const TextStyle(
+                  style: GoogleFonts.dmSans(
                     color: neuromathixText,
                     fontSize: 20,
                     fontWeight: FontWeight.w900,
@@ -848,7 +1106,7 @@ class _GuidanceCard extends StatelessWidget {
                 const SizedBox(height: 18),
                 Text(
                   data.guidanceBody,
-                  style: const TextStyle(
+                  style: GoogleFonts.dmSans(
                     color: neuromathixMuted,
                     fontSize: 16,
                     height: 1.45,
@@ -881,7 +1139,7 @@ class _ReportDialog extends StatelessWidget {
             children: [
               Text(
                 'Generated for ${report.generatedFor}',
-                style: const TextStyle(
+                style: GoogleFonts.dmSans(
                   color: neuromathixMuted,
                   fontWeight: FontWeight.w700,
                 ),
@@ -890,11 +1148,11 @@ class _ReportDialog extends StatelessWidget {
               SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: DataTable(
-                  headingTextStyle: const TextStyle(
+                  headingTextStyle: GoogleFonts.dmSans(
                     fontWeight: FontWeight.w900,
                     color: neuromathixText,
                   ),
-                  dataTextStyle: const TextStyle(
+                  dataTextStyle: GoogleFonts.dmSans(
                     color: neuromathixMuted,
                     fontWeight: FontWeight.w600,
                   ),

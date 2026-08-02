@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
+import '../theme/app_theme.dart';
 import '../widgets/teacher_app_shell.dart';
 
 class TeacherMessageDialog extends StatefulWidget {
@@ -47,7 +49,7 @@ class _TeacherMessageDialogState extends State<TeacherMessageDialog> {
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: const Color(0xFFE8EAF0)),
+            border: Border.all(color: AppColors.border),
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withValues(alpha: 0.18),
@@ -60,14 +62,14 @@ class _TeacherMessageDialogState extends State<TeacherMessageDialog> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   'Message',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                  style: GoogleFonts.dmSans(fontSize: 18, fontWeight: FontWeight.w800),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   widget.studentName,
-                  style: const TextStyle(
+                  style: GoogleFonts.dmSans(
                     fontSize: 12,
                     fontWeight: FontWeight.w700,
                     color: Colors.black54,
@@ -104,9 +106,9 @@ class _TeacherMessageDialogState extends State<TeacherMessageDialog> {
                 ),
                 const SizedBox(height: 22),
 
-                const Text(
+                Text(
                   'Quick templates',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
+                  style: GoogleFonts.dmSans(fontSize: 13, fontWeight: FontWeight.w800),
                 ),
                 const SizedBox(height: 12),
                 Wrap(
@@ -127,9 +129,9 @@ class _TeacherMessageDialogState extends State<TeacherMessageDialog> {
                 ),
                 const SizedBox(height: 18),
 
-                const Text(
+                Text(
                   'Message',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
+                  style: GoogleFonts.dmSans(fontSize: 13, fontWeight: FontWeight.w800),
                 ),
                 const SizedBox(height: 12),
                 _BigMessageBox(
@@ -176,7 +178,7 @@ class _FieldLabel extends StatelessWidget {
   Widget build(BuildContext context) {
     return Text(
       text,
-      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
+      style: GoogleFonts.dmSans(fontSize: 13, fontWeight: FontWeight.w800),
     );
   }
 }
@@ -195,20 +197,20 @@ class _InputPill extends StatelessWidget {
       height: 52,
       child: TextField(
         controller: controller,
-        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+        style: GoogleFonts.dmSans(fontSize: 12, fontWeight: FontWeight.w700),
         decoration: InputDecoration(
           hintText: hint,
-          hintStyle: const TextStyle(color: Colors.black45, fontSize: 11),
+          hintStyle: GoogleFonts.dmSans(color: Colors.black45, fontSize: 11),
           filled: true,
           fillColor: Colors.white,
           contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           enabledBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFFE8EAF0)),
+            borderSide: const BorderSide(color: AppColors.border),
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFF153E7C), width: 2),
+            borderSide: const BorderSide(color: AppColors.primary, width: 2),
           ),
         ),
       ),
@@ -241,14 +243,14 @@ class _DatePill extends StatelessWidget {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: const Color(0xFFE8EAF0)),
+          border: Border.all(color: AppColors.border),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
               label,
-              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
+              style: GoogleFonts.dmSans(fontSize: 12, fontWeight: FontWeight.w800),
             ),
             const SizedBox(width: 10),
             const Icon(Icons.calendar_month_rounded, size: 20),
@@ -277,12 +279,12 @@ class _TemplateButton extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 14),
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: const Color(0xFF153E7C),
+          color: AppColors.primary,
           borderRadius: BorderRadius.circular(18),
         ),
         child: Text(
           label,
-          style: const TextStyle(
+          style: GoogleFonts.dmSans(
             fontSize: 11,
             fontWeight: FontWeight.w800,
             color: Colors.white,
@@ -309,15 +311,15 @@ class _BigMessageBox extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFE8EAF0)),
+        border: Border.all(color: AppColors.border),
       ),
       child: TextField(
         controller: controller,
         maxLines: null,
-        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+        style: GoogleFonts.dmSans(fontSize: 12, fontWeight: FontWeight.w700),
         decoration: InputDecoration(
           hintText: hint,
-          hintStyle: const TextStyle(color: Colors.black45, fontSize: 11),
+          hintStyle: GoogleFonts.dmSans(color: Colors.black45, fontSize: 11),
           border: InputBorder.none,
         ),
       ),
@@ -347,13 +349,13 @@ class _ActionButton extends StatelessWidget {
         height: 44,
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: primary ? const Color(0xFF153E7C) : Colors.white,
+          color: primary ? AppColors.primary : Colors.white,
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: const Color(0xFFE8EAF0)),
+          border: Border.all(color: AppColors.border),
         ),
         child: Text(
           label,
-          style: TextStyle(
+          style: GoogleFonts.dmSans(
             fontSize: 12,
             fontWeight: FontWeight.w800,
             color: primary ? Colors.white : Colors.black87,

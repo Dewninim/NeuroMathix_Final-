@@ -1,6 +1,13 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
 import 'package:table_calendar/table_calendar.dart';
+
+import '../config/api_config.dart';
+import '../theme/app_theme.dart';
 
 class ReviewSchedulePage extends StatefulWidget {
   const ReviewSchedulePage({super.key});
@@ -10,53 +17,87 @@ class ReviewSchedulePage extends StatefulWidget {
 }
 
 class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
-  // Figma shows Feb 2026 examples; keep initial like design.
-  DateTime _focusedDay = DateTime(2026, 2, 1);
-  DateTime _selectedDay = DateTime(2026, 2, 11);
+  // Previously this entire page was hardcoded sample data copied from a
+  // Figma mockup (a static Feb 2026 calendar with "Linear Algebra" /
+  // "Integration" entries that never changed no matter what the student
+  // actually studied). Everything below marked REAL now comes from
+  // GET /user/<uid>/materials — the same real forgetting-curve data that
+  // powers the dashboard's Next Reviews section.
+  DateTime _focusedDay = _dateOnly(DateTime.now());
+  DateTime _selectedDay = _dateOnly(DateTime.now());
   CalendarFormat _format = CalendarFormat.month;
 
-  // Sample dashboard stats (top cards)
-  final int urgentModules = 2;
-  final int thisWeekCount = 6;
-  final Duration plannedTimeWeek = const Duration(minutes: 45);
-  final int streakDays = 7;
-
-  // Day -> topics
-  late final Map<DateTime, List<_Topic>> _topicsByDay = {
-    _d(2026, 2, 11): const [
-      _Topic(name: 'Linear Algebra', duration: Duration(minutes: 30), priority: _Priority.safe),
-      _Topic(name: 'Integration', duration: Duration(minutes: 35), priority: _Priority.urgent),
-    ],
-    _d(2026, 2, 7): const [
-      _Topic(name: 'Matrix Theory', duration: Duration(minutes: 45), priority: _Priority.urgent),
-      _Topic(name: 'Calculus', duration: Duration(minutes: 35), priority: _Priority.reviewSoon),
-      _Topic(name: 'Linear Algebra', duration: Duration(minutes: 40), priority: _Priority.safe),
-    ],
-  };
-
-  // Markers (red dot) for revision days
-  late final Map<DateTime, List<String>> _events = {
-    _d(2026, 2, 7): const ['Revision'],
-    _d(2026, 2, 11): const ['Revision'],
-  };
+  bool _loading = true;
+  String? _loadError;
+  List<_MaterialSchedule> _materials = [];
 
   _PriorityFilter _filter = _PriorityFilter.all;
+  late List<_ScheduleRowState> _scheduleRows = [];
 
-  // Schedule rows for selected day (in real app: load per day)
-  late List<_ScheduleRowState> _scheduleRows = [
-    _ScheduleRowState(
-      subject: 'Linear Algebra',
-      startTime: const TimeOfDay(hour: 18, minute: 0),
-      duration: const Duration(minutes: 30),
-      reminder: _Reminder.off,
-    ),
-    _ScheduleRowState(
-      subject: 'Integration',
-      startTime: const TimeOfDay(hour: 19, minute: 0),
-      duration: const Duration(minutes: 35),
-      reminder: _Reminder.off,
-    ),
-  ];
+  // Assumed per-review study duration — the backend tracks each session's
+  // actual time_taken historically, but doesn't currently expose a
+  // per-material "expected next session length" figure via
+  // /user/<uid>/materials, so this is a reasonable flat estimate rather
+  // than a real per-material number. Flagged here so it isn't mistaken for
+  // measured data.
+  static const Duration _assumedReviewDuration = Duration(minutes: 30);
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMaterials();
+  }
+
+  Future<void> _loadMaterials() async {
+    setState(() { _loading = true; _loadError = null; });
+    try {
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'anonymous';
+      final r = await http
+          .get(Uri.parse('$kApiBaseUrl/user/$uid/materials'))
+          .timeout(const Duration(seconds: 20));
+      if (r.statusCode != 200) throw Exception('Could not load schedule (${r.statusCode})');
+      final data = jsonDecode(r.body) as Map<String, dynamic>;
+      final list = (data['materials'] as List? ?? []).cast<Map<String, dynamic>>();
+      _materials = list
+          .map((m) => _MaterialSchedule.fromJson(m))
+          .where((m) => m.nextReviewDate != null)
+          .toList();
+      if (!mounted) return;
+      setState(() { _loading = false; _loadScheduleForSelectedDay(); });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() { _loading = false; _loadError = e.toString(); });
+    }
+  }
+
+  // ── REAL, derived from _materials — replaces the old static maps ──
+  Map<DateTime, List<_Topic>> get _topicsByDay {
+    final map = <DateTime, List<_Topic>>{};
+    for (final m in _materials) {
+      final day = _dateOnly(m.nextReviewDate!);
+      map.putIfAbsent(day, () => []).add(_Topic(
+        name: m.filename,
+        duration: _assumedReviewDuration,
+        priority: m.priority,
+      ));
+    }
+    return map;
+  }
+
+  Map<DateTime, List<String>> get _events {
+    final map = <DateTime, List<String>>{};
+    for (final m in _materials) {
+      map[_dateOnly(m.nextReviewDate!)] = const ['Revision'];
+    }
+    return map;
+  }
+
+  int get urgentModules => _materials.where((m) => m.priority == _Priority.urgent).length;
+  int get thisWeekCount => _materials
+      .where((m) => m.nextReviewDate!.difference(DateTime.now()).inDays <= 7)
+      .length;
+  Duration get plannedTimeWeek => _assumedReviewDuration * thisWeekCount;
+  int get materialsTracked => _materials.length;
 
   @override
   Widget build(BuildContext context) {
@@ -69,20 +110,29 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
           children: [
             const _PageHeader(),
             const SizedBox(height: 12),
-            _StatsRow(
-              urgentModules: urgentModules,
-              thisWeekCount: thisWeekCount,
-              plannedTime: plannedTimeWeek,
-              streakDays: streakDays,
-            ),
-            const SizedBox(height: 14),
-            _calendarCard(),
-            const SizedBox(height: 14),
-            _selectedDaySummaryCard(),
-            const SizedBox(height: 14),
-            _topicsCard(),
-            const SizedBox(height: 14),
-            _scheduleTableCard(),
+            if (_loading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 40),
+                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+              )
+            else if (_loadError != null)
+              _LoadErrorCard(message: _loadError!, onRetry: _loadMaterials)
+            else ...[
+              _StatsRow(
+                urgentModules: urgentModules,
+                thisWeekCount: thisWeekCount,
+                plannedTime: plannedTimeWeek,
+                materialsTracked: materialsTracked,
+              ),
+              const SizedBox(height: 14),
+              _calendarCard(),
+              const SizedBox(height: 14),
+              _selectedDaySummaryCard(),
+              const SizedBox(height: 14),
+              _topicsCard(),
+              const SizedBox(height: 14),
+              _scheduleTableCard(),
+            ],
           ],
         ),
       ),
@@ -99,7 +149,7 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Text('Month view', style: TextStyle(fontSize: 11, color: Colors.black45)),
+          Text('Month view', style: GoogleFonts.dmSans(fontSize: 11, color: Colors.black45)),
           const SizedBox(width: 10),
           _Segmented(
             left: 'Month',
@@ -133,7 +183,7 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
                 ),
                 child: Text(
                   DateFormat('MMMM yyyy').format(_focusedDay),
-                  style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12),
+                  style: GoogleFonts.dmSans(fontWeight: FontWeight.w800, fontSize: 12),
                 ),
               ),
               const SizedBox(width: 10),
@@ -176,9 +226,9 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
             },
             daysOfWeekHeight: 24,
             rowHeight: 46,
-            daysOfWeekStyle: const DaysOfWeekStyle(
-              weekdayStyle: TextStyle(fontSize: 11, color: Colors.black54, fontWeight: FontWeight.w600),
-              weekendStyle: TextStyle(fontSize: 11, color: Colors.black54, fontWeight: FontWeight.w600),
+            daysOfWeekStyle: DaysOfWeekStyle(
+              weekdayStyle: GoogleFonts.dmSans(fontSize: 11, color: Colors.black54, fontWeight: FontWeight.w600),
+              weekendStyle: GoogleFonts.dmSans(fontSize: 11, color: Colors.black54, fontWeight: FontWeight.w600),
             ),
             calendarStyle: const CalendarStyle(
               outsideDaysVisible: false,
@@ -220,12 +270,12 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
                   });
                 },
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF153E7C),
+                  backgroundColor: AppColors.primary,
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
                 ),
-                child: const Text('Back to Today', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                child: Text('Back to Today', style: GoogleFonts.dmSans(fontSize: 12, fontWeight: FontWeight.w700)),
               ),
             ],
           ),
@@ -235,46 +285,24 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
   }
 
   void _loadScheduleForSelectedDay() {
-    // Demo-only: change schedule rows based on selected day like your screenshots.
-    final d = _dateOnly(_selectedDay);
-
-    if (d == _d(2026, 2, 7)) {
-      _scheduleRows = [
-        _ScheduleRowState(
-          subject: 'Matrix Theory',
-          startTime: const TimeOfDay(hour: 18, minute: 0),
-          duration: const Duration(minutes: 45),
-          reminder: _Reminder.off,
-        ),
-        _ScheduleRowState(
-          subject: 'Calculus',
-          startTime: const TimeOfDay(hour: 19, minute: 0),
-          duration: const Duration(minutes: 35),
-          reminder: _Reminder.off,
-        ),
-        _ScheduleRowState(
-          subject: 'Linear Algebra',
-          startTime: const TimeOfDay(hour: 20, minute: 0),
-          duration: const Duration(minutes: 40),
-          reminder: _Reminder.off,
-        ),
-      ];
-    } else {
-      _scheduleRows = [
-        _ScheduleRowState(
-          subject: 'Linear Algebra',
-          startTime: const TimeOfDay(hour: 18, minute: 0),
-          duration: const Duration(minutes: 30),
-          reminder: _Reminder.off,
-        ),
-        _ScheduleRowState(
-          subject: 'Integration',
-          startTime: const TimeOfDay(hour: 19, minute: 0),
-          duration: const Duration(minutes: 35),
-          reminder: _Reminder.off,
-        ),
-      ];
-    }
+    // Real topics for the selected day (from _materials), each given a
+    // sequential default start time from 18:00 — the backend has no concept
+    // of "what hour of day you personally prefer to study", so the actual
+    // clock time here remains a local starting suggestion the student can
+    // drag via _autoArrange / the time picker, same as before.
+    final topics = _topicsByDay[_dateOnly(_selectedDay)] ?? const <_Topic>[];
+    var cursor = const TimeOfDay(hour: 18, minute: 0);
+    _scheduleRows = topics.map((t) {
+      final row = _ScheduleRowState(
+        subject: t.name,
+        startTime: cursor,
+        duration: t.duration,
+        reminder: _Reminder.off,
+      );
+      final end = DateTime(2026, 1, 1, cursor.hour, cursor.minute).add(t.duration);
+      cursor = TimeOfDay(hour: end.hour, minute: end.minute);
+      return row;
+    }).toList();
   }
 
   /* -------------------------- Selected Day Summary -------------------------- */
@@ -283,8 +311,11 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
     final topicsForDay = _topicsByDay[_dateOnly(_selectedDay)] ?? const <_Topic>[];
     final sessions = topicsForDay.length;
     final planned = topicsForDay.fold<Duration>(Duration.zero, (sum, t) => sum + t.duration);
-    final mainFocus = topicsForDay.isEmpty ? '-' : topicsForDay.last.name; // demo
-    final completion = 0.0; // screenshots show 0% sometimes
+    final mainFocus = topicsForDay.isEmpty ? '-' : topicsForDay.last.name;
+    // No per-day completion tracking exists yet on the backend for a
+    // scheduled-but-not-yet-started review, so this stays 0% until that's
+    // built — shown honestly rather than a fabricated progress value.
+    final completion = 0.0;
 
     return _CardShell(
       title: 'Selected Day Summary',
@@ -302,9 +333,9 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
           const SizedBox(height: 10),
           Row(
             children: [
-              const Text('Completion', style: TextStyle(fontSize: 11, color: Colors.black54)),
+              Text('Completion', style: GoogleFonts.dmSans(fontSize: 11, color: Colors.black54)),
               const Spacer(),
-              Text('${(completion * 100).round()}%', style: const TextStyle(fontSize: 11, color: Colors.black54)),
+              Text('${(completion * 100).round()}%', style: GoogleFonts.dmSans(fontSize: 11, color: Colors.black54)),
             ],
           ),
           const SizedBox(height: 6),
@@ -314,7 +345,7 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
               value: completion,
               minHeight: 6,
               backgroundColor: const Color(0xFFE9EDF6),
-              valueColor: const AlwaysStoppedAnimation(Color(0xFF153E7C)),
+              valueColor: const AlwaysStoppedAnimation(AppColors.primary),
             ),
           ),
         ],
@@ -336,7 +367,7 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
       subtitle: 'Filter topics by priority',
       trailing: Text(
         'Showing ${filtered.length}/${all.length} topics • ${_fmtMinutes(filteredSum)} / ${_fmtDuration(allSum)} • ${_filterLabel(_filter)}',
-        style: const TextStyle(fontSize: 10.5, color: Colors.black45),
+        style: GoogleFonts.dmSans(fontSize: 10.5, color: Colors.black45),
       ),
       child: Column(
         children: [
@@ -373,23 +404,23 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
               borderRadius: BorderRadius.circular(10),
               border: Border.all(color: const Color(0xFFCBD5E1)),
             ),
-            child: const Row(
+            child: Row(
               children: [
-                Text('Tip:', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 11)),
-                SizedBox(width: 8),
+                Text('Tip:', style: GoogleFonts.dmSans(fontWeight: FontWeight.w800, fontSize: 11)),
+                const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     'Set your hardest module for your best focus time. Consistency beats intensity.',
-                    style: TextStyle(fontSize: 11, color: Colors.black54),
+                    style: GoogleFonts.dmSans(fontSize: 11, color: Colors.black54),
                   ),
                 )
               ],
             ),
           ),
           const SizedBox(height: 8),
-          const Text(
+          Text(
             'Choose the start time for each subject. End time is calculated automatically. Use the bell to set a reminder',
-            style: TextStyle(fontSize: 10.5, color: Colors.black45),
+            style: GoogleFonts.dmSans(fontSize: 10.5, color: Colors.black45),
           ),
           const SizedBox(height: 12),
           for (int i = 0; i < _scheduleRows.length; i++)
@@ -409,27 +440,27 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
                   side: const BorderSide(color: Color(0xFFE6E9F2)),
                 ),
-                child: const Text('Auto Arrange', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12)),
+                child: Text('Auto Arrange', style: GoogleFonts.dmSans(fontWeight: FontWeight.w800, fontSize: 12)),
               ),
               const SizedBox(width: 10),
               ElevatedButton(
                 onPressed: () {},
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF153E7C),
+                  backgroundColor: AppColors.primary,
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
                 ),
-                child: const Text('Save Time Plan', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12)),
+                child: Text('Save Time Plan', style: GoogleFonts.dmSans(fontWeight: FontWeight.w800, fontSize: 12)),
               ),
             ],
           ),
           const SizedBox(height: 6),
-          const Align(
+          Align(
             alignment: Alignment.centerRight,
             child: Text(
               '• Auto Arrange gives  non overlap time  • After all save time plan',
-              style: TextStyle(fontSize: 10, color: Colors.black45),
+              style: GoogleFonts.dmSans(fontSize: 10, color: Colors.black45),
             ),
           ),
         ],
@@ -462,8 +493,6 @@ class _ReviewSchedulePageState extends State<ReviewSchedulePage> {
   /* ------------------------------- Helpers -------------------------------- */
 
   static DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
-  static DateTime _d(int y, int m, int day) => DateTime(y, m, day);
-
   static DateTime _toDateTime(DateTime day, TimeOfDay t) =>
       DateTime(day.year, day.month, day.day, t.hour, t.minute);
 
@@ -512,14 +541,14 @@ class _PageHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Column(
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Review Schedule', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-        SizedBox(height: 2),
+        Text('Review Schedule', style: GoogleFonts.dmSans(fontSize: 18, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 2),
         Text(
           'View your review schedule with subjects, dates, and time blocks',
-          style: TextStyle(color: Colors.black54, fontSize: 12),
+          style: GoogleFonts.dmSans(color: Colors.black54, fontSize: 12),
         ),
       ],
     );
@@ -530,13 +559,13 @@ class _StatsRow extends StatelessWidget {
   final int urgentModules;
   final int thisWeekCount;
   final Duration plannedTime;
-  final int streakDays;
+  final int materialsTracked;
 
   const _StatsRow({
     required this.urgentModules,
     required this.thisWeekCount,
     required this.plannedTime,
-    required this.streakDays,
+    required this.materialsTracked,
   });
 
   @override
@@ -548,7 +577,7 @@ class _StatsRow extends StatelessWidget {
           _StatCard(icon: Icons.assignment_late_outlined, title: '$urgentModules', subtitle: 'Urgent modules'),
           _StatCard(icon: Icons.calendar_today_outlined, title: '$thisWeekCount', subtitle: 'This week'),
           _StatCard(icon: Icons.timer_outlined, title: '${plannedTime.inMinutes}m', subtitle: 'Planned time'),
-          _StatCard(icon: Icons.bolt_outlined, title: '$streakDays days', subtitle: 'Streak'),
+          _StatCard(icon: Icons.folder_outlined, title: '$materialsTracked', subtitle: 'Materials tracked'),
         ];
 
         if (!isNarrow) {
@@ -609,8 +638,8 @@ class _StatCard extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Text(title, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
-              Text(subtitle, style: const TextStyle(color: Colors.black54, fontSize: 11)),
+              Text(title, style: GoogleFonts.dmSans(fontWeight: FontWeight.w800, fontSize: 16)),
+              Text(subtitle, style: GoogleFonts.dmSans(color: Colors.black54, fontSize: 11)),
             ],
           ),
         ],
@@ -649,11 +678,11 @@ class _CardShell extends StatelessWidget {
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(title, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13)),
+                  Text(title, style: GoogleFonts.dmSans(fontWeight: FontWeight.w800, fontSize: 13)),
                   if (subtitle != null)
                     Padding(
                       padding: const EdgeInsets.only(top: 2),
-                      child: Text(subtitle!, style: const TextStyle(fontSize: 11, color: Colors.black45)),
+                      child: Text(subtitle!, style: GoogleFonts.dmSans(fontSize: 11, color: Colors.black45)),
                     ),
                 ],
               ),
@@ -702,12 +731,12 @@ class _Segmented extends StatelessWidget {
               child: Container(
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: isLeftSelected ? const Color(0xFF153E7C) : Colors.transparent,
+                  color: isLeftSelected ? AppColors.primary : Colors.transparent,
                   borderRadius: BorderRadius.circular(16),
                 ),
                 child: Text(
                   left,
-                  style: TextStyle(
+                  style: GoogleFonts.dmSans(
                     fontSize: 11,
                     fontWeight: FontWeight.w800,
                     color: isLeftSelected ? Colors.white : Colors.black54,
@@ -723,12 +752,12 @@ class _Segmented extends StatelessWidget {
               child: Container(
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: !isLeftSelected ? const Color(0xFF153E7C) : Colors.transparent,
+                  color: !isLeftSelected ? AppColors.primary : Colors.transparent,
                   borderRadius: BorderRadius.circular(16),
                 ),
                 child: Text(
                   right,
-                  style: TextStyle(
+                  style: GoogleFonts.dmSans(
                     fontSize: 11,
                     fontWeight: FontWeight.w800,
                     color: !isLeftSelected ? Colors.white : Colors.black54,
@@ -782,7 +811,7 @@ class _DayCell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // Selected in Figma looks dark-blue filled; unselected is white with border.
-    final bg = isSelected ? const Color(0xFF153E7C) : Colors.white;
+    final bg = isSelected ? AppColors.primary : Colors.white;
     final border = const Color(0xFFE6E9F2);
     final textColor = isSelected ? Colors.white : Colors.black87;
 
@@ -798,7 +827,7 @@ class _DayCell extends StatelessWidget {
           Center(
             child: Text(
               '${day.day}',
-              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12, color: textColor),
+              style: GoogleFonts.dmSans(fontWeight: FontWeight.w800, fontSize: 12, color: textColor),
             ),
           ),
           if (hasMarker)
@@ -837,7 +866,7 @@ class _LegendDot extends StatelessWidget {
           decoration: BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.circular(8)),
         ),
         const SizedBox(width: 8),
-        Text(label, style: const TextStyle(fontSize: 11, color: Colors.black45)),
+        Text(label, style: GoogleFonts.dmSans(fontSize: 11, color: Colors.black45)),
       ],
     );
   }
@@ -864,9 +893,9 @@ class _InfoPill extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Text(title, style: const TextStyle(fontSize: 11, color: Colors.black54)),
+          Text(title, style: GoogleFonts.dmSans(fontSize: 11, color: Colors.black54)),
           const SizedBox(height: 2),
-          Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800)),
+          Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: GoogleFonts.dmSans(fontSize: 13, fontWeight: FontWeight.w800)),
         ],
       ),
     );
@@ -888,13 +917,13 @@ class _FilterChip extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
         decoration: BoxDecoration(
-          color: selected ? const Color(0xFF153E7C) : Colors.white,
+          color: selected ? AppColors.primary : Colors.white,
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: selected ? const Color(0xFF153E7C) : const Color(0xFFE6E9F2)),
+          border: Border.all(color: selected ? AppColors.primary : const Color(0xFFE6E9F2)),
         ),
         child: Text(
           label,
-          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: selected ? Colors.white : Colors.black87),
+          style: GoogleFonts.dmSans(fontSize: 11, fontWeight: FontWeight.w700, color: selected ? Colors.white : Colors.black87),
         ),
       ),
     );
@@ -918,8 +947,8 @@ class _TopicRow extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Expanded(child: Text(topic.name, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5))),
-          Text('${topic.duration.inMinutes}m', style: const TextStyle(color: Colors.black54, fontWeight: FontWeight.w600, fontSize: 11)),
+          Expanded(child: Text(topic.name, style: GoogleFonts.dmSans(fontWeight: FontWeight.w700, fontSize: 12.5))),
+          Text('${topic.duration.inMinutes}m', style: GoogleFonts.dmSans(color: Colors.black54, fontWeight: FontWeight.w600, fontSize: 11)),
         ],
       ),
     );
@@ -957,13 +986,13 @@ class _ScheduleRowWidget extends StatelessWidget {
         children: [
           Expanded(
             flex: 3,
-            child: Text(row.subject, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12.5)),
+            child: Text(row.subject, style: GoogleFonts.dmSans(fontWeight: FontWeight.w800, fontSize: 12.5)),
           ),
           Expanded(
             flex: 3,
             child: Row(
               children: [
-                const Text('Start time', style: TextStyle(fontSize: 10.5, color: Colors.black45)),
+                Text('Start time', style: GoogleFonts.dmSans(fontSize: 10.5, color: Colors.black45)),
                 const SizedBox(width: 10),
                 _TimeDropdownButton(
                   value: row.startTime,
@@ -976,7 +1005,7 @@ class _ScheduleRowWidget extends StatelessWidget {
           ),
           Expanded(
             flex: 2,
-            child: Text(endLabel, style: const TextStyle(fontSize: 11, color: Colors.black54)),
+            child: Text(endLabel, style: GoogleFonts.dmSans(fontSize: 11, color: Colors.black54)),
           ),
           _ReminderMenuButton(
             value: row.reminder,
@@ -1032,7 +1061,7 @@ class _TimeDropdownButton extends StatelessWidget {
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: const Color(0xFFE6E9F2)),
         ),
-        child: Text(label, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 11)),
+        child: Text(label, style: GoogleFonts.dmSans(fontWeight: FontWeight.w800, fontSize: 11)),
       ),
     );
   }
@@ -1086,8 +1115,8 @@ class _ReminderMenuRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Expanded(child: Text(title, style: const TextStyle(fontWeight: FontWeight.w700))),
-        Text(subtitle, style: const TextStyle(color: Colors.black54, fontSize: 12)),
+        Expanded(child: Text(title, style: GoogleFonts.dmSans(fontWeight: FontWeight.w700))),
+        Text(subtitle, style: GoogleFonts.dmSans(color: Colors.black54, fontSize: 12)),
       ],
     );
   }
@@ -1097,6 +1126,78 @@ class _ReminderMenuRow extends StatelessWidget {
 
 enum _Priority { urgent, reviewSoon, safe }
 enum _PriorityFilter { all, urgent, reviewSoon, safe }
+
+/// One material's real, backend-computed review schedule entry — replaces
+/// the hardcoded `_Topic` sample list that used to populate this whole page.
+class _MaterialSchedule {
+  final String materialId;
+  final String filename;
+  final DateTime? nextReviewDate;
+  final double? score;
+
+  _MaterialSchedule({
+    required this.materialId,
+    required this.filename,
+    required this.nextReviewDate,
+    required this.score,
+  });
+
+  factory _MaterialSchedule.fromJson(Map<String, dynamic> j) {
+    final latest = j['latest_session'] as Map<String, dynamic>?;
+    DateTime? nextReview;
+    final raw = latest?['next_review_date'] as String?;
+    if (raw != null) {
+      try { nextReview = DateTime.parse(raw); } catch (_) {}
+    }
+    return _MaterialSchedule(
+      materialId: j['material_id'] as String? ?? '',
+      filename: (j['filename'] as String? ?? 'Untitled.pdf').replaceAll('.pdf', ''),
+      nextReviewDate: nextReview,
+      score: (latest?['score'] as num?)?.toDouble(),
+    );
+  }
+
+  /// Urgent = overdue or due today; review-soon = within 3 days; else safe.
+  /// Mirrors the "1 timed out" / next-review framing already used on the
+  /// session results screen, so the definition of "urgent" is consistent
+  /// across the app rather than each screen inventing its own threshold.
+  _Priority get priority {
+    if (nextReviewDate == null) return _Priority.safe;
+    final days = nextReviewDate!.difference(DateTime.now()).inDays;
+    if (days <= 0) return _Priority.urgent;
+    if (days <= 3) return _Priority.reviewSoon;
+    return _Priority.safe;
+  }
+}
+
+class _LoadErrorCard extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
+  const _LoadErrorCard({required this.message, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE8EAF0)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Couldn\'t load your schedule',
+              style: GoogleFonts.dmSans(fontWeight: FontWeight.w800, fontSize: 14)),
+          const SizedBox(height: 6),
+          Text(message, style: GoogleFonts.dmSans(color: Colors.black54, fontSize: 12)),
+          const SizedBox(height: 12),
+          OutlinedButton(onPressed: onRetry, child: const Text('Retry')),
+        ],
+      ),
+    );
+  }
+}
 
 class _Topic {
   final String name;

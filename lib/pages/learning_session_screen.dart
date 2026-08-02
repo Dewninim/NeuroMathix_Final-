@@ -1,62 +1,106 @@
 // lib/screens/learning_session_screen.dart
 // ─────────────────────────────────────────────────────────────────────────────
 // LEARNING SESSION / QUIZ PAGE
-// Matches Screen 6 design from your screenshot exactly:
 //  - Session title + progress % top bar
-//  - Numbered step indicators (1–6)
+//  - Numbered step indicators (1–N), sequential unlock
 //  - Question cards: COMPLETED / TIME EXCEEDED / timer / PENDING states
-//  - Multiple choice options (A/B/C/D)
-//  - Hint button
+//  - Three question formats, matching the backend exactly:
+//      fill_blank   -> multiple choice (A/B/C/D)
+//      short_answer -> single typed answer
+//      multi_part   -> 4 typed sub-answers (a/b/c/d)
+//  - Hint button -> calls the real /hint endpoint, progressive levels, XAI-explained
+//  - Per-question timer that only runs for the ACTIVE question. On timeout,
+//    the student is asked to continue (tracked as red "overtime") or move on.
 //  - Submit Final Answer button
-//  - Results view with XAI explanations
+//  - Results view with XAI explanations, Model 1 difficulty, timeout/overtime badges
 //  - Forgetting curve + next session schedule
 // ─────────────────────────────────────────────────────────────────────────────
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import '../config/api_config.dart';
+import '../models/student_learning_models.dart';
+import '../theme/app_theme.dart';
+import 'explainable_ai_feedback_page.dart';
 
 // ══════════════════════════════════════════════════════════════════════════════
 // DATA MODELS
 // ══════════════════════════════════════════════════════════════════════════════
 
+class SubPart {
+  final String id;
+  final String prompt;
+  const SubPart({required this.id, required this.prompt});
+
+  factory SubPart.fromJson(Map<String, dynamic> j) => SubPart(
+        id:     j['id'] as String? ?? '',
+        prompt: j['prompt'] as String? ?? '',
+      );
+}
+
 class SessionQuestion {
   final String id;
   final String topic;
   final List<String> topicTags;
-  final String questionType;
+  final String questionType;   // easy / medium / hard  (difficulty tier)
+  final String format;         // fill_blank / short_answer / multi_part
   final String questionText;
-  final List<String> options;
-  final String hint;
+  final List<String> options;      // fill_blank only
+  final List<SubPart> subParts;    // multi_part only
   final int difficultyScore;
   final String difficultyLevel;
+  final int timeAllottedSeconds;
+  final int? model1DifficultyScore;
+  final String? model1DifficultyLevel;
+  final double? model1Confidence;
+  final String? model1Source;
+  final bool grounded;
 
   const SessionQuestion({
     required this.id,
     required this.topic,
     required this.topicTags,
     required this.questionType,
+    required this.format,
     required this.questionText,
     required this.options,
-    required this.hint,
+    required this.subParts,
     required this.difficultyScore,
     required this.difficultyLevel,
+    required this.timeAllottedSeconds,
+    this.model1DifficultyScore,
+    this.model1DifficultyLevel,
+    this.model1Confidence,
+    this.model1Source,
+    this.grounded = true,
   });
 
   factory SessionQuestion.fromJson(Map<String, dynamic> j) => SessionQuestion(
         id:              j['id'] as String? ?? 'q1',
         topic:           j['topic'] as String? ?? 'General',
         topicTags:       List<String>.from(j['topic_tags'] as List? ?? []),
-        questionType:    j['question_type'] as String? ?? 'multiple_choice',
+        questionType:    j['question_type'] as String? ?? 'medium',
+        format:          j['format'] as String? ?? 'fill_blank',
         questionText:    j['question_text'] as String? ?? '',
         options:         List<String>.from(j['options'] as List? ?? []),
-        hint:            j['hint'] as String? ?? '',
+        subParts:        (j['sub_parts'] as List? ?? [])
+            .map((sp) => SubPart.fromJson(sp as Map<String, dynamic>))
+            .toList(),
         difficultyScore: j['difficulty_score'] as int? ?? 3,
         difficultyLevel: j['difficulty_level'] as String? ?? 'medium',
+        timeAllottedSeconds: (j['time_allotted_seconds'] as num?)?.toInt() ?? 90,
+        model1DifficultyScore: (j['model1_difficulty_score'] as num?)?.toInt(),
+        model1DifficultyLevel: j['model1_difficulty_level'] as String?,
+        model1Confidence: (j['model1_confidence'] as num?)?.toDouble(),
+        model1Source: j['model1_source'] as String?,
+        grounded: j['grounded'] as bool? ?? true,
       );
 }
 
@@ -64,39 +108,104 @@ class QuestionResult {
   final String questionId;
   final String questionText;
   final String topic;
-  final List<String> options;
-  final int correctIndex;
-  final int selectedIndex;
+  final String format;
+  final Map<String, dynamic> answer;         // what the student submitted
+  final Map<String, dynamic> correctAnswer;  // revealed only after grading
   final bool isCorrect;
+  final double score;
   final double timeTaken;
-  final int hintsUsed;
+  final int timeAllottedSeconds;
+  final bool timedOut;
+  final double overtimeSeconds;
+  final bool continuedAfterTimeout;
+  final List<Map<String, dynamic>> hintsUsed;
   final Map<String, dynamic> xai;
+  final int? model1DifficultyScore;
+  final String? model1DifficultyLevel;
+  final double? model1Confidence;
+  final String? model1Source;
 
   const QuestionResult({
     required this.questionId,
     required this.questionText,
     required this.topic,
-    required this.options,
-    required this.correctIndex,
-    required this.selectedIndex,
+    required this.format,
+    required this.answer,
+    required this.correctAnswer,
     required this.isCorrect,
+    required this.score,
     required this.timeTaken,
+    required this.timeAllottedSeconds,
+    required this.timedOut,
+    required this.overtimeSeconds,
+    required this.continuedAfterTimeout,
     required this.hintsUsed,
     required this.xai,
+    this.model1DifficultyScore,
+    this.model1DifficultyLevel,
+    this.model1Confidence,
+    this.model1Source,
   });
 
   factory QuestionResult.fromJson(Map<String, dynamic> j) => QuestionResult(
         questionId:    j['question_id'] as String? ?? '',
         questionText:  j['question_text'] as String? ?? '',
         topic:         j['topic'] as String? ?? '',
-        options:       List<String>.from(j['options'] as List? ?? []),
-        correctIndex:  j['correct_index'] as int? ?? 0,
-        selectedIndex: j['selected_index'] as int? ?? 0,
+        format:        j['format'] as String? ?? 'fill_blank',
+        answer:        Map<String, dynamic>.from(j['answer'] as Map? ?? {}),
+        correctAnswer: Map<String, dynamic>.from(j['correct_answer'] as Map? ?? {}),
         isCorrect:     j['is_correct'] as bool? ?? false,
+        score:         (j['score'] as num?)?.toDouble() ?? 0.0,
         timeTaken:     (j['time_taken'] as num?)?.toDouble() ?? 0,
-        hintsUsed:     j['hints_used'] as int? ?? 0,
-        xai:           j['xai'] as Map<String, dynamic>? ?? {},
+        timeAllottedSeconds: (j['time_allotted_seconds'] as num?)?.toInt() ?? 90,
+        timedOut:      j['timed_out'] as bool? ?? false,
+        overtimeSeconds: (j['overtime_seconds'] as num?)?.toDouble() ?? 0.0,
+        continuedAfterTimeout: j['continued_after_timeout'] as bool? ?? false,
+        hintsUsed: (j['hints_used'] as List? ?? [])
+            .map((h) => Map<String, dynamic>.from(h as Map))
+            .toList(),
+        xai:           Map<String, dynamic>.from(j['xai'] as Map? ?? {}),
+        model1DifficultyScore: (j['model1_difficulty_score'] as num?)?.toInt(),
+        model1DifficultyLevel: j['model1_difficulty_level'] as String?,
+        model1Confidence: (j['model1_confidence'] as num?)?.toDouble(),
+        model1Source: j['model1_source'] as String?,
       );
+
+  /// Human-readable "what the student answered", per format.
+  String get yourAnswerText {
+    switch (format) {
+      case 'fill_blank':
+        return answer['selected_text'] as String? ?? '(no answer)';
+      case 'short_answer':
+        final t = answer['answer_text'] as String? ?? '';
+        return t.trim().isEmpty ? '(no answer)' : t;
+      case 'multi_part':
+        final subs = Map<String, dynamic>.from(answer['sub_answers'] as Map? ?? {});
+        if (subs.isEmpty) return '(no answer)';
+        return subs.entries.map((e) => '${e.key}) ${e.value}').join('   ');
+      default:
+        return '(no answer)';
+    }
+  }
+
+  /// Human-readable correct answer, per format.
+  String get correctAnswerText {
+    switch (format) {
+      case 'fill_blank':
+        return correctAnswer['correct_text'] as String? ?? '—';
+      case 'short_answer':
+        return correctAnswer['expected_answer']?.toString() ?? '—';
+      case 'multi_part':
+        final subs = (correctAnswer['sub_parts'] as List? ?? [])
+            .map((sp) => Map<String, dynamic>.from(sp as Map));
+        if (subs.isEmpty) return '—';
+        return subs
+            .map((sp) => '${sp['id']}) ${sp['expected_answer']}')
+            .join('   ');
+      default:
+        return '—';
+    }
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -106,8 +215,8 @@ class QuestionResult {
 const String _base = kApiBaseUrl;
 
 Future<List<SessionQuestion>> apiStartSession(String sessionId) async {
-  final r = await http.post(
-    Uri.parse('$_base/session/$sessionId/start'),
+  final r = await http.get(
+    Uri.parse('$_base/session/$sessionId/questions'),
     headers: {'Content-Type': 'application/json'},
   ).timeout(const Duration(seconds: 90));
 
@@ -119,6 +228,28 @@ Future<List<SessionQuestion>> apiStartSession(String sessionId) async {
   return (data['questions'] as List)
       .map((q) => SessionQuestion.fromJson(q as Map<String, dynamic>))
       .toList();
+}
+
+/// Fetches ONE progressive hint from the backend's real XAI hint endpoint.
+/// [currentAnswer] is whatever the student has typed/selected so far, so the
+/// hint can be contextual (e.g. "you're on the right track" vs "start here").
+Future<Map<String, dynamic>> apiGetHint({
+  required String sessionId,
+  required String questionId,
+  required int hintLevel,
+  required String currentAnswer,
+}) async {
+  final r = await http.post(
+    Uri.parse('$_base/session/$sessionId/question/$questionId/hint'),
+    headers: {'Content-Type': 'application/json'},
+    body: jsonEncode({'hint_level': hintLevel, 'current_answer': currentAnswer}),
+  ).timeout(const Duration(seconds: 30));
+
+  if (r.statusCode != 200) {
+    final b = jsonDecode(r.body);
+    throw Exception(b['error'] ?? 'Failed to get hint');
+  }
+  return jsonDecode(r.body) as Map<String, dynamic>;
 }
 
 Future<Map<String, dynamic>> apiSubmitAnswers(
@@ -143,37 +274,62 @@ Future<Map<String, dynamic>> apiSubmitAnswers(
 enum SessionPhase { loading, questioning, submitting, results, error }
 
 class _QuestionRuntime {
+  // fill_blank
   final int? selectedIndex;
-  final bool hintShown;
-  final int hintsUsed;
-  final DateTime startedAt;
-  final bool confirmed;      // answer locked in
-  final bool timeExceeded;   // >120s
+  // short_answer
+  final String answerText;
+  // multi_part  (sub-part id -> typed value)
+  final Map<String, String> subAnswers;
+
+  final bool hintLoading;
+  final List<Map<String, dynamic>> hintsUsed; // [{level, hint_text}]
+  final DateTime? startedAt;   // null until this question becomes ACTIVE
+  final bool confirmed;        // answer locked in (by student, or by "move on")
+  final bool timedOut;         // allotted time reached at least once
+  final bool continuedAfterTimeout; // student chose to keep trying past the limit
+  final bool timeoutPromptShown;    // so the dialog only fires once
+  final int overtimeSeconds;        // extra time spent AFTER timedOut, tracked separately
 
   const _QuestionRuntime({
     this.selectedIndex,
-    this.hintShown  = false,
-    this.hintsUsed  = 0,
-    required this.startedAt,
-    this.confirmed  = false,
-    this.timeExceeded = false,
+    this.answerText = '',
+    this.subAnswers = const {},
+    this.hintLoading = false,
+    this.hintsUsed = const [],
+    this.startedAt,
+    this.confirmed = false,
+    this.timedOut = false,
+    this.continuedAfterTimeout = false,
+    this.timeoutPromptShown = false,
+    this.overtimeSeconds = 0,
   });
 
   _QuestionRuntime copyWith({
     int? selectedIndex,
-    bool? hintShown,
-    int? hintsUsed,
+    bool clearSelectedIndex = false,
+    String? answerText,
+    Map<String, String>? subAnswers,
+    bool? hintLoading,
+    List<Map<String, dynamic>>? hintsUsed,
     DateTime? startedAt,
     bool? confirmed,
-    bool? timeExceeded,
+    bool? timedOut,
+    bool? continuedAfterTimeout,
+    bool? timeoutPromptShown,
+    int? overtimeSeconds,
   }) =>
       _QuestionRuntime(
-        selectedIndex: selectedIndex ?? this.selectedIndex,
-        hintShown:     hintShown    ?? this.hintShown,
-        hintsUsed:     hintsUsed    ?? this.hintsUsed,
-        startedAt:     startedAt    ?? this.startedAt,
-        confirmed:     confirmed    ?? this.confirmed,
-        timeExceeded:  timeExceeded ?? this.timeExceeded,
+        selectedIndex: clearSelectedIndex ? null : (selectedIndex ?? this.selectedIndex),
+        answerText:    answerText    ?? this.answerText,
+        subAnswers:    subAnswers    ?? this.subAnswers,
+        hintLoading:   hintLoading   ?? this.hintLoading,
+        hintsUsed:     hintsUsed     ?? this.hintsUsed,
+        startedAt:     startedAt     ?? this.startedAt,
+        confirmed:     confirmed     ?? this.confirmed,
+        timedOut:      timedOut      ?? this.timedOut,
+        continuedAfterTimeout: continuedAfterTimeout ?? this.continuedAfterTimeout,
+        timeoutPromptShown:    timeoutPromptShown    ?? this.timeoutPromptShown,
+        overtimeSeconds:       overtimeSeconds        ?? this.overtimeSeconds,
       );
 }
 
@@ -209,7 +365,10 @@ class _LearningSessionScreenState
   Map<String, dynamic>?  _submitResult;
   String?                _error;
 
-  // Per-question timers (elapsed seconds)
+  // Per-question timers (elapsed seconds) — ONLY the active question's
+  // entry advances. Locked/pending questions never accumulate time, so
+  // one question timing out can never cascade into every later question
+  // showing "TIME EXCEEDED" before the student has even seen them.
   final Map<int, int> _elapsed = {};
   Timer? _globalTimer;
 
@@ -226,16 +385,20 @@ class _LearningSessionScreenState
     super.dispose();
   }
 
-  // ── Load questions (Model 2 via Gemini) ───────────────────────────────────
+  // ── Load questions ───────────────────────────────────────────────────────
   Future<void> _loadQuestions() async {
     setState(() { _phase = SessionPhase.loading; _error = null; });
     try {
       final qs = await apiStartSession(widget.sessionId);
-      final now = DateTime.now();
       setState(() {
         _questions = qs;
-        _runtimes  = List.generate(qs.length, (_) => _QuestionRuntime(startedAt: now));
-        _phase     = SessionPhase.questioning;
+        _elapsed.clear();
+        // Only question 0 starts "active" (its clock begins now). Every
+        // other question stays unstarted (startedAt: null) until it's
+        // unlocked, which is when we stamp its startedAt in _activateNext().
+        _runtimes = List.generate(qs.length, (i) =>
+            _QuestionRuntime(startedAt: i == 0 ? DateTime.now() : null));
+        _phase = SessionPhase.questioning;
       });
       _startGlobalTimer();
     } catch (e) {
@@ -243,21 +406,122 @@ class _LearningSessionScreenState
     }
   }
 
+  // ── Which question is currently active (unlocked + not yet confirmed) ────
+  int? get _activeIndex {
+    for (int i = 0; i < _questions.length; i++) {
+      if (!_runtimes[i].confirmed) return i;
+    }
+    return null;
+  }
+
   void _startGlobalTimer() {
     _globalTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (_phase != SessionPhase.questioning) return;
+      final active = _activeIndex;
+      if (active == null) return;
+      final rt = _runtimes[active];
+      if (rt.startedAt == null) return; // safety guard
+
       setState(() {
-        for (int i = 0; i < _questions.length; i++) {
-          if (!_runtimes[i].confirmed) {
-            _elapsed[i] = (_elapsed[i] ?? 0) + 1;
-            // Mark time exceeded after 120 seconds
-            if ((_elapsed[i] ?? 0) >= 120 && !_runtimes[i].timeExceeded) {
-              _runtimes[i] = _runtimes[i].copyWith(timeExceeded: true);
-            }
-          }
+        _elapsed[active] = (_elapsed[active] ?? 0) + 1;
+        final allotted = _questions[active].timeAllottedSeconds;
+        final e = _elapsed[active]!;
+
+        if (e >= allotted && !rt.timedOut) {
+          // First time crossing the limit on THIS question only.
+          _runtimes[active] = rt.copyWith(timedOut: true);
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _showTimeoutPrompt(active);
+          });
+        } else if (rt.timedOut && rt.continuedAfterTimeout) {
+          // Past the limit and the student chose to keep going —
+          // track this extra time separately (shown in red).
+          final overtime = e - allotted;
+          _runtimes[active] =
+              _runtimes[active].copyWith(overtimeSeconds: overtime);
         }
       });
     });
+  }
+
+  // ── Timeout decision dialog ──────────────────────────────────────────────
+  void _showTimeoutPrompt(int qIndex) {
+    if (!mounted) return;
+    final rt = _runtimes[qIndex];
+    if (rt.confirmed || rt.timeoutPromptShown) return;
+    setState(() {
+      _runtimes[qIndex] = _runtimes[qIndex].copyWith(timeoutPromptShown: true);
+    });
+
+    final q = _questions[qIndex];
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: Row(
+          children: [
+            const Icon(Icons.timer_off_outlined, color: Color(0xFFDC2626)),
+            const SizedBox(width: 10),
+            Text('Time\'s up!',
+                style: GoogleFonts.dmSans(fontWeight: FontWeight.w800)),
+          ],
+        ),
+        content: Text(
+          'You\'ve used the allotted ${q.timeAllottedSeconds}s for this question '
+          '(${q.topic}). You can keep trying — the extra time will be tracked '
+          'separately and shown in red — or move on and come back to it later.',
+          style: GoogleFonts.dmSans(fontSize: 13.5, height: 1.5),
+        ),
+        actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              _moveOnFromTimeout(qIndex);
+            },
+            child: Text('Move On',
+                style: GoogleFonts.dmSans(
+                    color: const Color(0xFF6B7280), fontWeight: FontWeight.w700)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              setState(() {
+                _runtimes[qIndex] =
+                    _runtimes[qIndex].copyWith(continuedAfterTimeout: true);
+              });
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.accent,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            child: const Text('Continue Trying'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Student chose to skip a timed-out question rather than keep trying.
+  /// Locks in whatever (possibly empty) answer they had, marks it timed
+  /// out with no continuation, and unlocks the next question.
+  void _moveOnFromTimeout(int qIndex) {
+    setState(() {
+      _runtimes[qIndex] = _runtimes[qIndex].copyWith(
+        confirmed: true,
+        continuedAfterTimeout: false,
+      );
+      _activateNext(qIndex);
+    });
+  }
+
+  void _activateNext(int justConfirmedIndex) {
+    final next = justConfirmedIndex + 1;
+    if (next < _runtimes.length && _runtimes[next].startedAt == null) {
+      _runtimes[next] = _runtimes[next].copyWith(startedAt: DateTime.now());
+    }
   }
 
   // ── Answer interactions ───────────────────────────────────────────────────
@@ -268,21 +532,93 @@ class _LearningSessionScreenState
     });
   }
 
-  void _confirmAnswer(int qIndex) {
-    if (_runtimes[qIndex].selectedIndex == null) return;
+  void _setAnswerText(int qIndex, String text) {
+    if (_runtimes[qIndex].confirmed) return;
     setState(() {
-      _runtimes[qIndex] = _runtimes[qIndex].copyWith(confirmed: true);
+      _runtimes[qIndex] = _runtimes[qIndex].copyWith(answerText: text);
     });
   }
 
-  void _useHint(int qIndex) {
-    if (_runtimes[qIndex].hintShown) return;
+  void _setSubAnswer(int qIndex, String subId, String text) {
+    if (_runtimes[qIndex].confirmed) return;
     setState(() {
-      _runtimes[qIndex] = _runtimes[qIndex].copyWith(
-        hintShown: true,
-        hintsUsed: _runtimes[qIndex].hintsUsed + 1,
-      );
+      final updated = Map<String, String>.from(_runtimes[qIndex].subAnswers);
+      updated[subId] = text;
+      _runtimes[qIndex] = _runtimes[qIndex].copyWith(subAnswers: updated);
     });
+  }
+
+  bool _hasAnswer(int qIndex) {
+    final q  = _questions[qIndex];
+    final rt = _runtimes[qIndex];
+    switch (q.format) {
+      case 'fill_blank':
+        return rt.selectedIndex != null;
+      case 'short_answer':
+        return rt.answerText.trim().isNotEmpty;
+      case 'multi_part':
+        return q.subParts.any((sp) => (rt.subAnswers[sp.id] ?? '').trim().isNotEmpty);
+      default:
+        return false;
+    }
+  }
+
+  void _confirmAnswer(int qIndex) {
+    if (!_hasAnswer(qIndex)) return;
+    setState(() {
+      _runtimes[qIndex] = _runtimes[qIndex].copyWith(confirmed: true);
+      _activateNext(qIndex);
+    });
+  }
+
+  // ── Hints — real progressive XAI hints from the backend ─────────────────
+  String _currentAnswerForHint(int qIndex) {
+    final q  = _questions[qIndex];
+    final rt = _runtimes[qIndex];
+    switch (q.format) {
+      case 'fill_blank':
+        return (rt.selectedIndex != null && rt.selectedIndex! < q.options.length)
+            ? q.options[rt.selectedIndex!]
+            : '';
+      case 'short_answer':
+        return rt.answerText;
+      case 'multi_part':
+        return rt.subAnswers.entries.map((e) => '${e.key}=${e.value}').join(', ');
+      default:
+        return '';
+    }
+  }
+
+  Future<void> _useHint(int qIndex) async {
+    final rt = _runtimes[qIndex];
+    if (rt.hintLoading || rt.confirmed) return;
+    if (rt.hintsUsed.length >= 10) return; // MAX_HINT_LEVEL on the backend
+
+    setState(() {
+      _runtimes[qIndex] = rt.copyWith(hintLoading: true);
+    });
+    final nextLevel = rt.hintsUsed.length + 1;
+    try {
+      final res = await apiGetHint(
+        sessionId: widget.sessionId,
+        questionId: _questions[qIndex].id,
+        hintLevel: nextLevel,
+        currentAnswer: _currentAnswerForHint(qIndex),
+      );
+      if (!mounted) return;
+      setState(() {
+        final updated = List<Map<String, dynamic>>.from(_runtimes[qIndex].hintsUsed)
+          ..add({'level': nextLevel, 'hint_text': res['hint_text']});
+        _runtimes[qIndex] =
+            _runtimes[qIndex].copyWith(hintsUsed: updated, hintLoading: false);
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() { _runtimes[qIndex] = _runtimes[qIndex].copyWith(hintLoading: false); });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not load hint: $e')),
+      );
+    }
   }
 
   // ── Submit all ────────────────────────────────────────────────────────────
@@ -293,12 +629,29 @@ class _LearningSessionScreenState
     final answers = <Map<String, dynamic>>[];
     for (int i = 0; i < _questions.length; i++) {
       final rt = _runtimes[i];
-      answers.add({
-        'question_id':    _questions[i].id,
-        'selected_index': rt.selectedIndex ?? 0,
-        'time_taken':     (_elapsed[i] ?? 30).toDouble(),
-        'hints_used':     rt.hintsUsed,
-      });
+      final q  = _questions[i];
+      final totalTime = (_elapsed[i] ?? 0).toDouble();
+
+      final ans = <String, dynamic>{
+        'question_id': q.id,
+        'time_taken': totalTime,
+        'timed_out': rt.timedOut,
+        'overtime_seconds': rt.overtimeSeconds.toDouble(),
+        'continued_after_timeout': rt.continuedAfterTimeout,
+        'hints_used': rt.hintsUsed,
+      };
+      switch (q.format) {
+        case 'fill_blank':
+          ans['selected_index'] = rt.selectedIndex ?? -1;
+          break;
+        case 'short_answer':
+          ans['answer_text'] = rt.answerText;
+          break;
+        case 'multi_part':
+          ans['sub_answers'] = rt.subAnswers;
+          break;
+      }
+      answers.add(ans);
     }
 
     try {
@@ -347,7 +700,7 @@ class _LearningSessionScreenState
       height: 52,
       padding: const EdgeInsets.symmetric(horizontal: 20),
       decoration: const BoxDecoration(
-        color: Color(0xFF1B2A4A),
+        color: AppColors.primary,
         boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4)],
       ),
       child: Row(
@@ -360,8 +713,8 @@ class _LearningSessionScreenState
             constraints: const BoxConstraints(),
           ),
           const SizedBox(width: 12),
-          const Text('NUROMATHIX',
-              style: TextStyle(
+          Text('NUROMATHIX',
+              style: GoogleFonts.dmSans(
                   color: Colors.white,
                   fontWeight: FontWeight.w900,
                   fontSize: 13,
@@ -375,7 +728,7 @@ class _LearningSessionScreenState
               width: 30,
               height: 30,
               decoration: const BoxDecoration(
-                  color: Color(0xFF4F6EAB), shape: BoxShape.circle),
+                  color: AppColors.accent, shape: BoxShape.circle),
               child: const Center(
                 child: Text('R',
                     style: TextStyle(
@@ -406,7 +759,7 @@ class _LearningSessionScreenState
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // QUIZ BODY (matches screenshot design)
+  // QUIZ BODY
   // ══════════════════════════════════════════════════════════════════════════
 
   Widget _buildQuizBody() {
@@ -419,7 +772,10 @@ class _LearningSessionScreenState
         Container(
           padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
           color: Colors.white,
-          child: Column(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 880),
+              child: Column(
             children: [
               Row(
                 children: [
@@ -431,14 +787,14 @@ class _LearningSessionScreenState
                       style: GoogleFonts.dmSans(
                           fontSize: 14,
                           fontWeight: FontWeight.w700,
-                          color: const Color(0xFF1B2A4A)),
+                          color: AppColors.primary),
                     ),
                   ),
                   Text(
                     'Session Progress ${(_progress * 100).round()}%',
                     style: GoogleFonts.dmSans(
                         fontSize: 11.5,
-                        color: const Color(0xFF4F6EAB),
+                        color: AppColors.accent,
                         fontWeight: FontWeight.w600),
                   ),
                 ],
@@ -451,7 +807,7 @@ class _LearningSessionScreenState
                   value: _progress,
                   minHeight: 5,
                   backgroundColor: const Color(0xFFE5E7EB),
-                  valueColor: const AlwaysStoppedAnimation(Color(0xFF4F6EAB)),
+                  valueColor: const AlwaysStoppedAnimation(AppColors.accent),
                 ),
               ),
               const SizedBox(height: 12),
@@ -461,15 +817,22 @@ class _LearningSessionScreenState
                   confirmed: _runtimes.map((r) => r.confirmed).toList()),
               const SizedBox(height: 12),
             ],
+              ),
+            ),
           ),
         ),
 
         // ── Question list ─────────────────────────────────────────────────
         Expanded(
-          child: ListView.builder(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 100),
-            itemCount: _questions.length,
-            itemBuilder: (ctx, i) => _buildQuestionCard(i),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 880),
+              child: ListView.builder(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 100),
+                itemCount: _questions.length,
+                itemBuilder: (ctx, i) => _buildQuestionCard(i),
+              ),
+            ),
           ),
         ),
 
@@ -489,11 +852,13 @@ class _LearningSessionScreenState
     final rt = _runtimes[i];
     final elapsed = _elapsed[i] ?? 0;
 
-    // Status
-    final isCompleted   = rt.confirmed;
-    final isTimeExceeded = rt.timeExceeded && !rt.confirmed;
-    final isPending     = i > 0 && !_runtimes[i - 1].confirmed && !isCompleted;
-    final isActive      = !isPending && !isCompleted;
+    final isCompleted    = rt.confirmed;
+    // "Time exceeded" is shown ONLY for the specific question that hit its
+    // own limit and has NOT been told to continue — never for any other
+    // question, and never for one that's still locked/pending.
+    final isTimeExceeded = rt.timedOut && !rt.continuedAfterTimeout && !isCompleted;
+    final isPending      = rt.startedAt == null && !isCompleted;
+    final isActive       = !isPending && !isCompleted;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 14),
@@ -520,17 +885,19 @@ class _LearningSessionScreenState
           // Card header
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
-            child: Row(
+            child: Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              runSpacing: 6,
               children: [
                 Text(
-                  'QUESTION ${i + 1} · ${q.questionType.replaceAll('_', ' ').toUpperCase()}',
+                  'QUESTION ${i + 1} · ${_formatLabel(q.format)}',
                   style: GoogleFonts.dmSans(
                       fontSize: 10,
                       fontWeight: FontWeight.w700,
-                      color: const Color(0xFF9CA3AF),
+                      color: AppColors.textFaint,
                       letterSpacing: 0.5),
                 ),
-                const SizedBox(width: 8),
                 Text(
                   q.topic.toUpperCase(),
                   style: GoogleFonts.dmSans(
@@ -539,37 +906,22 @@ class _LearningSessionScreenState
                       color: const Color(0xFF6366F1),
                       letterSpacing: 0.5),
                 ),
-                const Spacer(),
-                // Status badge
-                if (isCompleted)
-                  _StatusBadge(
-                    label: 'COMPLETED · ${_fmtTime(elapsed)}',
-                    color: const Color(0xFF16A34A),
-                    bg:    const Color(0xFFDCFCE7),
-                    icon:  Icons.check_circle_outline,
-                  )
-                else if (isTimeExceeded)
-                  _StatusBadge(
-                    label: 'TIME EXCEEDED · ${_fmtTime(elapsed)}',
-                    color: const Color(0xFFDC2626),
-                    bg:    const Color(0xFFFEE2E2),
-                    icon:  Icons.timer_off_outlined,
-                  )
-                else if (isPending)
-                  const _StatusBadge(
-                    label: 'Pending',
-                    color: Color(0xFF6B7280),
-                    bg:    Color(0xFFF3F4F6),
-                    icon:  Icons.lock_outline,
-                  )
-                else
-                  _StatusBadge(
-                    label: _fmtTime(elapsed),
-                    color: const Color(0xFF0EA5E9),
-                    bg:    const Color(0xFFE0F2FE),
-                    icon:  Icons.timer_outlined,
+                if (q.model1DifficultyLevel != null)
+                  _Model1Badge(
+                    score: q.model1DifficultyScore ?? q.difficultyScore,
+                    level: q.model1DifficultyLevel!,
+                    confidence: q.model1Confidence,
+                    source: q.model1Source,
                   ),
               ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: _buildStatusBadge(
+                  isCompleted, isTimeExceeded, isPending, rt, elapsed, q),
             ),
           ),
 
@@ -580,16 +932,16 @@ class _LearningSessionScreenState
                 style: GoogleFonts.dmSans(
                     fontSize: 15,
                     fontWeight: FontWeight.w700,
-                    color: const Color(0xFF1B2A4A))),
+                    color: AppColors.primary)),
           ),
 
           if (isPending)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
               child: Text(
-                'Question content will be visible after submitting Q$i',
+                'This question unlocks once you confirm question $i.',
                 style: GoogleFonts.dmSans(
-                    fontSize: 13, color: const Color(0xFF9CA3AF)),
+                    fontSize: 13, color: AppColors.textFaint),
               ),
             )
           else ...[
@@ -599,26 +951,30 @@ class _LearningSessionScreenState
               child: _buildQuestionText(q.questionText),
             ),
 
-            // Options (A/B/C/D)
+            // Answer input — format-aware
             if (!isCompleted)
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
-                child: _OptionsGrid(
-                  options:       q.options,
-                  selectedIndex: rt.selectedIndex,
-                  onSelect:      isActive
-                      ? (idx) => _selectOption(i, idx)
-                      : null,
-                ),
+                child: _buildAnswerInput(i, q, rt, isActive),
+              )
+            else
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+                child: _buildConfirmedAnswerSummary(q, rt),
               ),
 
-            // Hint banner
-            if (rt.hintShown) ...[
+            // Hint banner(s) — real progressive XAI hints
+            if (rt.hintsUsed.isNotEmpty) ...[
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-                child: _HintBanner(hint: q.hint),
+                child: _HintBanner(hints: rt.hintsUsed),
               ),
             ],
+            if (rt.hintLoading)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 10, 16, 0),
+                child: LinearProgressIndicator(minHeight: 3),
+              ),
 
             // Action row (Hint + Confirm)
             if (!isCompleted && isActive)
@@ -626,10 +982,14 @@ class _LearningSessionScreenState
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
                 child: Row(
                   children: [
-                    if (!rt.hintShown)
-                      _HintButton(onTap: () => _useHint(i)),
+                    if (rt.hintsUsed.length < 10)
+                      _HintButton(
+                        onTap: rt.hintLoading ? null : () => _useHint(i),
+                        nextLevel: rt.hintsUsed.length + 1,
+                        loading: rt.hintLoading,
+                      ),
                     const Spacer(),
-                    if (rt.selectedIndex != null)
+                    if (_hasAnswer(i))
                       _ConfirmButton(onTap: () => _confirmAnswer(i)),
                   ],
                 ),
@@ -637,6 +997,147 @@ class _LearningSessionScreenState
             else
               const SizedBox(height: 16),
           ],
+        ],
+      ),
+    );
+  }
+
+  String _formatLabel(String format) {
+    switch (format) {
+      case 'fill_blank':   return 'MULTIPLE CHOICE';
+      case 'short_answer': return 'SHORT ANSWER';
+      case 'multi_part':   return 'MULTI-PART PROBLEM';
+      default:              return format.replaceAll('_', ' ').toUpperCase();
+    }
+  }
+
+  Widget _buildStatusBadge(bool isCompleted, bool isTimeExceeded, bool isPending,
+      _QuestionRuntime rt, int elapsed, SessionQuestion q) {
+    if (isCompleted) {
+      final overtimeTag = rt.overtimeSeconds > 0
+          ? ' (+${_fmtTime(rt.overtimeSeconds)} overtime)'
+          : '';
+      return _StatusBadge(
+        label: 'COMPLETED · ${_fmtTime(elapsed)}$overtimeTag',
+        color: const Color(0xFF16A34A),
+        bg:    const Color(0xFFDCFCE7),
+        icon:  Icons.check_circle_outline,
+      );
+    }
+    if (isTimeExceeded) {
+      return _StatusBadge(
+        label: 'TIME EXCEEDED · ${_fmtTime(elapsed)} / ${_fmtTime(q.timeAllottedSeconds)}',
+        color: const Color(0xFFDC2626),
+        bg:    const Color(0xFFFEE2E2),
+        icon:  Icons.timer_off_outlined,
+      );
+    }
+    if (isPending) {
+      return const _StatusBadge(
+        label: 'Pending',
+        color: Color(0xFF6B7280),
+        bg:    Color(0xFFF3F4F6),
+        icon:  Icons.lock_outline,
+      );
+    }
+    if (rt.continuedAfterTimeout) {
+      // Over the allotted time and still going — show the base allotment
+      // in the normal colour and the extra time in red, as requested.
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _StatusBadge(
+            label: _fmtTime(q.timeAllottedSeconds),
+            color: const Color(0xFF0EA5E9),
+            bg:    const Color(0xFFE0F2FE),
+            icon:  Icons.timer_outlined,
+          ),
+          const SizedBox(width: 6),
+          _StatusBadge(
+            label: '+${_fmtTime(rt.overtimeSeconds)} overtime',
+            color: const Color(0xFFDC2626),
+            bg:    const Color(0xFFFEE2E2),
+            icon:  Icons.hourglass_bottom,
+          ),
+        ],
+      );
+    }
+    return _StatusBadge(
+      label: '${_fmtTime(elapsed)} / ${_fmtTime(q.timeAllottedSeconds)}',
+      color: const Color(0xFF0EA5E9),
+      bg:    const Color(0xFFE0F2FE),
+      icon:  Icons.timer_outlined,
+    );
+  }
+
+  // ── Answer input — one branch per backend `format` ──────────────────────
+  Widget _buildAnswerInput(int i, SessionQuestion q, _QuestionRuntime rt, bool isActive) {
+    switch (q.format) {
+      case 'fill_blank':
+        return _OptionsGrid(
+          options:       q.options,
+          selectedIndex: rt.selectedIndex,
+          onSelect:      isActive ? (idx) => _selectOption(i, idx) : null,
+        );
+      case 'short_answer':
+        return _ShortAnswerField(
+          key: ValueKey('sa_$i'),
+          initialValue: rt.answerText,
+          enabled: isActive,
+          onChanged: (v) => _setAnswerText(i, v),
+        );
+      case 'multi_part':
+        return _MultiPartFields(
+          key: ValueKey('mp_$i'),
+          subParts: q.subParts,
+          values: rt.subAnswers,
+          enabled: isActive,
+          onChanged: (subId, v) => _setSubAnswer(i, subId, v),
+        );
+      default:
+        return const SizedBox.shrink();
+    }
+  }
+
+  Widget _buildConfirmedAnswerSummary(SessionQuestion q, _QuestionRuntime rt) {
+    String text;
+    switch (q.format) {
+      case 'fill_blank':
+        text = (rt.selectedIndex != null && rt.selectedIndex! < q.options.length)
+            ? q.options[rt.selectedIndex!]
+            : '(no answer given)';
+        break;
+      case 'short_answer':
+        text = rt.answerText.trim().isEmpty ? '(no answer given)' : rt.answerText;
+        break;
+      case 'multi_part':
+        text = q.subParts
+            .map((sp) => '${sp.id}) ${rt.subAnswers[sp.id]?.trim().isNotEmpty == true ? rt.subAnswers[sp.id] : '—'}')
+            .join('   ');
+        break;
+      default:
+        text = '';
+    }
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF0FDF4),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFBBF7D0)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.check_circle, color: Color(0xFF16A34A), size: 16),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text('Your answer: $text',
+                style: GoogleFonts.dmSans(
+                    fontSize: 12.5,
+                    color: const Color(0xFF166534),
+                    fontWeight: FontWeight.w600)),
+          ),
         ],
       ),
     );
@@ -664,12 +1165,12 @@ class _LearningSessionScreenState
               decoration: const BoxDecoration(
                 color: Color(0xFFEFF6FF),
                 border: Border(
-                  bottom: BorderSide(color: Color(0xFF4F6EAB), width: 2),
+                  bottom: BorderSide(color: AppColors.accent, width: 2),
                 ),
               ),
-              child: const Text('      ?      ',
-                  style: TextStyle(
-                      color: Color(0xFF4F6EAB), fontSize: 14)),
+              child: Text('      ?      ',
+                  style: GoogleFonts.dmSans(
+                      color: AppColors.accent, fontSize: 14)),
             ),
           ),
           TextSpan(text: parts.length > 1 ? parts[1] : ''),
@@ -690,7 +1191,7 @@ class _LearningSessionScreenState
               style: GoogleFonts.dmSans(
                   fontSize: 18,
                   fontWeight: FontWeight.w700,
-                  color: const Color(0xFF1B2A4A))),
+                  color: AppColors.primary)),
           const SizedBox(height: 8),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -703,7 +1204,7 @@ class _LearningSessionScreenState
           ElevatedButton(
             onPressed: _loadQuestions,
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF4F6EAB),
+              backgroundColor: AppColors.accent,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10)),
@@ -739,7 +1240,7 @@ class _StepIndicatorRow extends StatelessWidget {
                 height: 28,
                 decoration: BoxDecoration(
                   color: done
-                      ? const Color(0xFF4F6EAB)
+                      ? AppColors.accent
                       : const Color(0xFFE5E7EB),
                   shape: BoxShape.circle,
                 ),
@@ -747,7 +1248,7 @@ class _StepIndicatorRow extends StatelessWidget {
                   child: Text(
                     '${i + 1}',
                     style: TextStyle(
-                        color: done ? Colors.white : const Color(0xFF9CA3AF),
+                        color: done ? Colors.white : AppColors.textFaint,
                         fontSize: 11,
                         fontWeight: FontWeight.w700),
                   ),
@@ -758,7 +1259,7 @@ class _StepIndicatorRow extends StatelessWidget {
                   child: Container(
                     height: 2,
                     color: done
-                        ? const Color(0xFF4F6EAB)
+                        ? AppColors.accent
                         : const Color(0xFFE5E7EB),
                   ),
                 ),
@@ -801,6 +1302,48 @@ class _StatusBadge extends StatelessWidget {
   }
 }
 
+/// Small badge that surfaces Model 1's actual per-chunk difficulty output
+/// (score, level, confidence, and whether it came from the trained Random
+/// Forest or the heuristic fallback) directly on each question, so it's
+/// independently visible/checkable that Model 1's result is really being
+/// used to build the session — not just asserted in a log file.
+class _Model1Badge extends StatelessWidget {
+  final int score;
+  final String level;
+  final double? confidence;
+  final String? source;
+  const _Model1Badge({required this.score, required this.level, this.confidence, this.source});
+
+  @override
+  Widget build(BuildContext context) {
+    final isRf = source == 'model1_rf';
+    return Tooltip(
+      message: 'Model 1 (difficulty prediction): $score/5 · $level'
+          '${confidence != null ? ' · ${(confidence! * 100).round()}% confidence' : ''}'
+          '\nSource: ${isRf ? 'trained Random Forest' : 'heuristic fallback'}',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF5F3FF),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: const Color(0xFFDDD6FE)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(isRf ? Icons.model_training : Icons.functions,
+                size: 11, color: const Color(0xFF7C3AED)),
+            const SizedBox(width: 3),
+            Text('M1: $score/5',
+                style: const TextStyle(
+                    color: Color(0xFF7C3AED), fontSize: 9.5, fontWeight: FontWeight.w800)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _OptionsGrid extends StatelessWidget {
   final List<String> options;
   final int? selectedIndex;
@@ -815,112 +1358,291 @@ class _OptionsGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final labels = ['A', 'B', 'C', 'D'];
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount:   2,
-        childAspectRatio: 3.5,
-        crossAxisSpacing: 8,
-        mainAxisSpacing:  8,
-      ),
-      itemCount: options.length,
-      itemBuilder: (ctx, i) {
-        final sel = selectedIndex == i;
-        return GestureDetector(
-          onTap: () => onSelect?.call(i),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            decoration: BoxDecoration(
-              color: sel
-                  ? const Color(0xFFEFF6FF)
-                  : const Color(0xFFF9FAFB),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(
-                color: sel
-                    ? const Color(0xFF4F6EAB)
-                    : const Color(0xFFE5E7EB),
-                width: sel ? 1.5 : 1,
+    // Previously a GridView with childAspectRatio: 3.5 — that derives cell
+    // HEIGHT from the container's WIDTH, so on a wide desktop browser each
+    // option ballooned to 250-300px tall for a single line of text like
+    // "175". Fixed-height rows (in pairs of 2) stay a sensible ~64px
+    // regardless of window width.
+    final rows = <Widget>[];
+    for (int i = 0; i < options.length; i += 2) {
+      final hasSecond = i + 1 < options.length;
+      rows.add(Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(child: _OptionCell(label: labels[i], text: options[i], selected: selectedIndex == i, onTap: () => onSelect?.call(i))),
+              if (hasSecond) ...[
+                const SizedBox(width: 8),
+                Expanded(child: _OptionCell(label: labels[i + 1], text: options[i + 1], selected: selectedIndex == i + 1, onTap: () => onSelect?.call(i + 1))),
+              ],
+            ],
+          ),
+        ),
+      ));
+    }
+    return Column(children: rows);
+  }
+}
+
+class _OptionCell extends StatelessWidget {
+  final String label;
+  final String text;
+  final bool selected;
+  final VoidCallback onTap;
+  const _OptionCell({required this.label, required this.text, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        constraints: const BoxConstraints(minHeight: 52),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFFEFF6FF) : const Color(0xFFF9FAFB),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: selected ? AppColors.accent : const Color(0xFFE5E7EB),
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Text(
+              '$label) ',
+              style: TextStyle(
+                  color: selected ? AppColors.accent : const Color(0xFF6B7280),
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13),
+            ),
+            Expanded(
+              child: Text(
+                text,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    color: selected ? AppColors.primary : const Color(0xFF374151),
+                    fontSize: 13,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400),
               ),
             ),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            child: Row(
-              children: [
-                Text(
-                  '${labels[i]}) ',
-                  style: TextStyle(
-                      color: sel
-                          ? const Color(0xFF4F6EAB)
-                          : const Color(0xFF6B7280),
-                      fontWeight: FontWeight.w700,
-                      fontSize: 13),
-                ),
-                Expanded(
-                  child: Text(
-                    options[i],
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                        color: sel
-                            ? const Color(0xFF1B2A4A)
-                            : const Color(0xFF374151),
-                        fontSize: 13,
-                        fontWeight: sel ? FontWeight.w600 : FontWeight.w400),
-                  ),
-                ),
-                if (sel)
-                  Container(
-                    width: 18,
-                    height: 18,
-                    decoration: const BoxDecoration(
-                        color: Color(0xFF4F6EAB), shape: BoxShape.circle),
-                    child: const Icon(Icons.check,
-                        color: Colors.white, size: 11),
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
+            if (selected) ...[
+              const SizedBox(width: 6),
+              Container(
+                width: 18,
+                height: 18,
+                decoration: const BoxDecoration(color: AppColors.accent, shape: BoxShape.circle),
+                child: const Icon(Icons.check, color: Colors.white, size: 11),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }
 
-class _HintBanner extends StatelessWidget {
-  final String hint;
-  const _HintBanner({required this.hint});
+/// Free-text input for `short_answer` format questions. This is what was
+/// entirely missing before — the old screen only ever rendered an options
+/// grid, so short-answer questions had no way to type an answer at all.
+class _ShortAnswerField extends StatefulWidget {
+  final String initialValue;
+  final bool enabled;
+  final ValueChanged<String> onChanged;
+  const _ShortAnswerField({
+    super.key,
+    required this.initialValue,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  @override
+  State<_ShortAnswerField> createState() => _ShortAnswerFieldState();
+}
+
+class _ShortAnswerFieldState extends State<_ShortAnswerField> {
+  late final TextEditingController _ctrl =
+      TextEditingController(text: widget.initialValue);
+
+  @override
+  void dispose() { _ctrl.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: const Color(0xFFFFFBEB),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFFFDE68A)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Icon(Icons.lightbulb_outline,
-              color: Color(0xFFF59E0B), size: 16),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(hint,
-                style: GoogleFonts.dmSans(
-                    fontSize: 12.5,
-                    color: const Color(0xFF92400E),
-                    height: 1.5)),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: TextField(
+        controller: _ctrl,
+        enabled: widget.enabled,
+        onChanged: widget.onChanged,
+        inputFormatters: [LengthLimitingTextInputFormatter(200)],
+        style: GoogleFonts.dmSans(fontSize: 14, color: AppColors.primary),
+        decoration: InputDecoration(
+          hintText: 'Type your answer (a number or short expression)…',
+          hintStyle: GoogleFonts.dmSans(fontSize: 13, color: AppColors.textFaint),
+          filled: true,
+          fillColor: const Color(0xFFF9FAFB),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
           ),
-        ],
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: const BorderSide(color: AppColors.accent, width: 1.5),
+          ),
+        ),
       ),
+    );
+  }
+}
+
+/// Four typed sub-answers for `multi_part` format questions (Part a/b/c/d).
+/// Also entirely missing before — multi_part questions rendered as an empty
+/// options grid since `options` is never populated for this format.
+class _MultiPartFields extends StatefulWidget {
+  final List<SubPart> subParts;
+  final Map<String, String> values;
+  final bool enabled;
+  final void Function(String subId, String value) onChanged;
+  const _MultiPartFields({
+    super.key,
+    required this.subParts,
+    required this.values,
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  @override
+  State<_MultiPartFields> createState() => _MultiPartFieldsState();
+}
+
+class _MultiPartFieldsState extends State<_MultiPartFields> {
+  late final Map<String, TextEditingController> _ctrls = {
+    for (final sp in widget.subParts)
+      sp.id: TextEditingController(text: widget.values[sp.id] ?? ''),
+  };
+
+  @override
+  void dispose() {
+    for (final c in _ctrls.values) { c.dispose(); }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Column(
+        children: widget.subParts.map((sp) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(sp.prompt,
+                    style: GoogleFonts.dmSans(
+                        fontSize: 13, color: const Color(0xFF374151), height: 1.4)),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _ctrls[sp.id],
+                  enabled: widget.enabled,
+                  onChanged: (v) => widget.onChanged(sp.id, v),
+                  inputFormatters: [LengthLimitingTextInputFormatter(80)],
+                  style: GoogleFonts.dmSans(fontSize: 13.5, color: AppColors.primary),
+                  decoration: InputDecoration(
+                    hintText: 'Part ${sp.id}) answer…',
+                    hintStyle: GoogleFonts.dmSans(fontSize: 12.5, color: AppColors.textFaint),
+                    filled: true,
+                    fillColor: const Color(0xFFF9FAFB),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: AppColors.accent, width: 1.5),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
+/// Shows every progressive hint requested so far (level 1, 2, 3…), each
+/// from the real backend XAI hint endpoint — not a single static string.
+class _HintBanner extends StatelessWidget {
+  final List<Map<String, dynamic>> hints;
+  const _HintBanner({required this.hints});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: hints.map((h) {
+        return Container(
+          margin: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFFBEB),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFFDE68A)),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.lightbulb_outline,
+                  color: Color(0xFFF59E0B), size: 16),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('HINT · LEVEL ${h['level']}',
+                        style: GoogleFonts.dmSans(
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.6,
+                            color: const Color(0xFFB45309))),
+                    const SizedBox(height: 3),
+                    Text(h['hint_text']?.toString() ?? '',
+                        style: GoogleFonts.dmSans(
+                            fontSize: 12.5,
+                            color: const Color(0xFF92400E),
+                            height: 1.5)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      }).toList(),
     );
   }
 }
 
 class _HintButton extends StatelessWidget {
-  final VoidCallback onTap;
-  const _HintButton({required this.onTap});
+  final VoidCallback? onTap;
+  final int nextLevel;
+  final bool loading;
+  const _HintButton({required this.onTap, required this.nextLevel, this.loading = false});
 
   @override
   Widget build(BuildContext context) {
@@ -936,14 +1658,19 @@ class _HintButton extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.lightbulb_outline,
-                color: Color(0xFFF59E0B), size: 14),
+            if (loading)
+              const SizedBox(
+                width: 12, height: 12,
+                child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFF59E0B)),
+              )
+            else
+              const Icon(Icons.lightbulb_outline, color: Color(0xFFF59E0B), size: 14),
             const SizedBox(width: 6),
-            Text('Hint',
+            Text(nextLevel == 1 ? 'Hint' : 'Next hint (Lv $nextLevel)',
                 style: GoogleFonts.dmSans(
                     fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
-                    color: const Color(0xFFF59E0B))),
+                    fontWeight: FontWeight.w700,
+                    color: const Color(0xFFB45309))),
           ],
         ),
       ),
@@ -962,7 +1689,7 @@ class _ConfirmButton extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
         decoration: BoxDecoration(
-          color: const Color(0xFF4F6EAB),
+          color: AppColors.accent,
           borderRadius: BorderRadius.circular(20),
         ),
         child: Text('Confirm',
@@ -1006,8 +1733,8 @@ class _SubmitBar extends StatelessWidget {
               label: const Text('Submit Final Answer'),
               style: ElevatedButton.styleFrom(
                 backgroundColor: onSubmit != null
-                    ? const Color(0xFF1B2A4A)
-                    : const Color(0xFF9CA3AF),
+                    ? AppColors.primary
+                    : AppColors.textFaint,
                 foregroundColor: Colors.white,
                 padding:
                     const EdgeInsets.symmetric(horizontal: 22, vertical: 13),
@@ -1040,6 +1767,7 @@ class _LoadingViewState extends State<_LoadingView>
     'Running Model 1 difficulty analysis…',
     'Building your learner profile…',
     'Model 2 generating personalised questions via Gemini…',
+    'Checking generated questions against your material…',
     'Adapting question difficulty and language…',
     'Almost ready — preparing your session…',
   ];
@@ -1080,17 +1808,17 @@ class _LoadingViewState extends State<_LoadingView>
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   gradient: const SweepGradient(
-                    colors: [Color(0xFF4F6EAB), Color(0xFFF3F4F8)],
+                    colors: [AppColors.accent, Color(0xFFF3F4F8)],
                   ),
                   boxShadow: [
                     BoxShadow(
-                        color: const Color(0xFF4F6EAB).withOpacity(0.25),
+                        color: AppColors.accent.withOpacity(0.25),
                         blurRadius: 20)
                   ],
                 ),
                 child: const Center(
                     child: Icon(Icons.psychology_outlined,
-                        color: Color(0xFF1B2A4A), size: 26)),
+                        color: AppColors.primary, size: 26)),
               ),
             ),
             const SizedBox(height: 28),
@@ -1102,12 +1830,12 @@ class _LoadingViewState extends State<_LoadingView>
                   style: GoogleFonts.dmSans(
                       fontSize: 15,
                       fontWeight: FontWeight.w600,
-                      color: const Color(0xFF1B2A4A))),
+                      color: AppColors.primary)),
             ),
             const SizedBox(height: 10),
             Text('This may take up to 30 seconds',
                 style: GoogleFonts.dmSans(
-                    fontSize: 12.5, color: const Color(0xFF9CA3AF))),
+                    fontSize: 12.5, color: AppColors.textFaint)),
           ],
         ),
       ),
@@ -1124,174 +1852,260 @@ class _SubmittingView extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           const CircularProgressIndicator(
-              color: Color(0xFF4F6EAB), strokeWidth: 3),
+              color: AppColors.accent, strokeWidth: 3),
           const SizedBox(height: 20),
           Text('Analysing your answers…',
               style: GoogleFonts.dmSans(
                   fontSize: 16,
                   fontWeight: FontWeight.w600,
-                  color: const Color(0xFF1B2A4A))),
+                  color: AppColors.primary)),
           const SizedBox(height: 6),
           Text('XAI generating explanations + forgetting curve',
               style: GoogleFonts.dmSans(
-                  fontSize: 12.5, color: const Color(0xFF9CA3AF))),
+                  fontSize: 12.5, color: AppColors.textFaint)),
         ],
       ),
     );
   }
 }
 
+
 // ══════════════════════════════════════════════════════════════════════════════
-// RESULTS VIEW — XAI + Forgetting Curve
+// RESULTS VIEW — one unified page (no tabs): score, per-question review with
+// inline XAI, then a plain-language "next review" card. No internal method
+// names (Ebbinghaus / stability / raw formula) are shown to the student —
+// those are implementation details that power the scheduling, not something
+// the student needs to see or should have to interpret.
 // ══════════════════════════════════════════════════════════════════════════════
 
-class _ResultsView extends StatefulWidget {
+class _ResultsView extends StatelessWidget {
   final Map<String, dynamic> result;
   final List<SessionQuestion> questions;
   const _ResultsView({super.key, required this.result, required this.questions});
 
   @override
-  State<_ResultsView> createState() => _ResultsViewState();
+  Widget build(BuildContext context) {
+    final score   = (result['score'] as num?)?.toDouble() ?? 0;
+    final correct = result['correct'] as int? ?? 0;
+    final total   = result['total'] as int? ?? 0;
+    final pct     = (score * 100).round();
+    final results = (result['results'] as List? ?? [])
+        .map((r) => QuestionResult.fromJson(r as Map<String, dynamic>))
+        .toList();
+    final curve         = result['forgetting_curve'] as Map<String, dynamic>? ?? {};
+    final mastery       = result['mastery_reached'] as bool? ?? false;
+    final timeoutCount  = results.where((r) => r.timedOut).length;
+    final nextDays      = result['next_review_days'];
+    final nextDate      = result['next_review_date'] as String?;
+
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 880),
+        child: ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+      children: [
+        // ── Score header card — big, bold score front and centre ──────────
+        Container(
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 10, offset: const Offset(0, 3))],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text('$pct%',
+                      style: GoogleFonts.dmSans(
+                          fontSize: 56, fontWeight: FontWeight.w900, height: 1,
+                          color: pct >= 70 ? const Color(0xFF16A34A) : const Color(0xFFDC2626))),
+                  const SizedBox(width: 14),
+                  Text('$correct / $total correct',
+                      style: GoogleFonts.dmSans(fontSize: 14, color: AppColors.textFaint, fontWeight: FontWeight.w600)),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                mastery ? '🎓 Mastery Achieved!' : pct >= 70 ? '🎯 Great Session!' : '📖 Keep Practising!',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.dmSans(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.primary),
+              ),
+              const SizedBox(height: 8),
+              if (nextDate != null)
+                Text(
+                  'Next review in $nextDays day${nextDays == 1 ? '' : 's'} · $nextDate',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.dmSans(fontSize: 12.5, color: AppColors.accent, fontWeight: FontWeight.w600),
+                ),
+              if (timeoutCount > 0) ...[
+                const SizedBox(height: 10),
+                Center(child: _Chip(label: '⏱ $timeoutCount question${timeoutCount == 1 ? '' : 's'} timed out', color: const Color(0xFFDC2626))),
+              ],
+            ],
+          ),
+        ),
+
+        const SizedBox(height: 18),
+        Text('QUESTION REVIEW',
+            style: GoogleFonts.dmSans(fontSize: 11, fontWeight: FontWeight.w700, color: AppColors.textFaint, letterSpacing: 1)),
+        const SizedBox(height: 10),
+
+        ...results.asMap().entries.map((e) => _ResultCard(index: e.key, result: e.value)),
+
+        const SizedBox(height: 8),
+        _NextReviewCard(curve: curve, nextDays: nextDays, nextDate: nextDate, mastery: mastery),
+
+        const SizedBox(height: 18),
+        Row(
+          children: [
+            Expanded(
+              child: _ResultsNavButton(
+                icon: Icons.psychology_outlined,
+                label: 'View AI Feedback',
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ExplainableAiFeedbackPage(
+                      initialData: buildRealAiFeedbackData(result, results),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _ResultsNavButton(
+                icon: Icons.bar_chart_rounded,
+                label: 'View Analytics',
+                onTap: () => Navigator.pushNamed(context, '/analytics'),
+              ),
+            ),
+          ],
+        ),
+      ],
+        ),
+      ),
+    );
+  }
 }
 
-class _ResultsViewState extends State<_ResultsView>
-    with SingleTickerProviderStateMixin {
-  late TabController _tabs;
+/// Builds a REAL AiFeedbackData from this session's actual /submit response
+/// — not the mock FirestoreStudentLearningService. Every field here is
+/// either pulled directly from the backend result, or (for the retention
+/// curve points beyond "now") computed by evaluating the backend's own
+/// Ebbinghaus formula R(t)=e^(-t/S) using its real, just-computed stability
+/// value — the same formula the backend documents using for scheduling.
+/// This is a single-session snapshot, not multi-session history (the app
+/// doesn't have that yet), so the curve plots one real trajectory rather
+/// than tracking retention across several past sessions.
+AiFeedbackData buildRealAiFeedbackData(
+  Map<String, dynamic> result,
+  List<QuestionResult> results,
+) {
+  final curve = result['forgetting_curve'] as Map<String, dynamic>? ?? {};
+  final stability = (curve['stability'] as num?)?.toDouble() ?? 5.0;
+  final nextReviewDays = (result['next_review_days'] as num?)?.toDouble() ?? stability;
+  final uid = FirebaseAuth.instance.currentUser?.uid ?? 'student';
 
-  @override
-  void initState() {
-    super.initState();
-    _tabs = TabController(length: 3, vsync: this);
-  }
+  // Focus concept = the weakest-scoring question this session (or the first
+  // one if everything was correct) — the one actually worth a deep-dive.
+  final sorted = [...results]..sort((a, b) => a.score.compareTo(b.score));
+  final focus = sorted.isNotEmpty ? sorted.first : null;
 
-  @override
-  void dispose() { _tabs.dispose(); super.dispose(); }
+  double retentionAt(double days) => math.exp(-days / stability) * 100;
+
+  final curvePoints = <RetentionCurvePoint>[
+    RetentionCurvePoint(label: 'Today', day: 0, predictedRetention: retentionAt(0), idealRetention: 95, isCurrent: true),
+    RetentionCurvePoint(label: '${(nextReviewDays / 2).round()}d', day: nextReviewDays / 2, predictedRetention: retentionAt(nextReviewDays / 2), idealRetention: 85),
+    RetentionCurvePoint(label: '${nextReviewDays.round()}d (review)', day: nextReviewDays, predictedRetention: retentionAt(nextReviewDays), idealRetention: 70),
+  ];
+
+  final factors = <ExplanationFactor>[
+    ExplanationFactor(
+      id: 'accuracy',
+      title: 'Session Accuracy',
+      value: '${((result['score'] as num? ?? 0) * 100).round()}%',
+      description: '${result['correct']} of ${result['total']} questions correct this session.',
+      tone: ((result['score'] as num? ?? 0) >= 0.7) ? 'green' : 'orange',
+    ),
+    if (focus != null)
+      ExplanationFactor(
+        id: 'pastPerformance',
+        title: 'Hint Usage',
+        value: '${focus.hintsUsed.length} hint${focus.hintsUsed.length == 1 ? '' : 's'}',
+        description: focus.hintsUsed.isEmpty
+            ? 'You solved this without needing a hint.'
+            : 'You used ${focus.hintsUsed.length} progressive hints before answering.',
+        tone: focus.hintsUsed.length >= 3 ? 'orange' : 'blue',
+      ),
+    if (focus != null)
+      ExplanationFactor(
+        id: 'timeLapse',
+        title: 'Time Taken',
+        value: '${focus.timeTaken.toStringAsFixed(0)}s / ${focus.timeAllottedSeconds}s',
+        description: focus.timedOut
+            ? 'You went over the allotted time for this question.'
+            : 'Within the allotted time for this question\'s difficulty.',
+        tone: focus.timedOut ? 'orange' : 'green',
+      ),
+  ];
+
+  final reportRows = results
+      .map((r) => ReportMetricRow(
+            metric: r.topic,
+            value: r.isCorrect ? 'Correct' : 'Incorrect',
+            interpretation: '${r.timeTaken.toStringAsFixed(0)}s, ${r.hintsUsed.length} hint(s)',
+            recommendation: r.isCorrect ? 'Maintain with periodic review' : 'Review this concept before next session',
+          ))
+      .toList();
+
+  return AiFeedbackData(
+    id: result['session_id'] as String? ?? 'session',
+    studentId: uid,
+    courseTitle: 'This Session',
+    conceptTitle: focus?.topic ?? 'Session Overview',
+    badgeLabel: 'THIS SESSION',
+    headline: focus != null && !focus.isCorrect
+        ? 'Focus Area: ${focus.topic}'
+        : 'Nice work this session!',
+    summary: focus?.xai['xai_text'] as String? ??
+        'You completed this session — here\'s the AI\'s read on how it went.',
+    currentRetentionPercent: retentionAt(0).round(),
+    declinePercent: (100 - retentionAt(nextReviewDays)).round(),
+    recoveryRetentionPercent: 95,
+    retentionDescription:
+        'Based on this session\'s actual performance, your memory strength for this material is estimated at ${stability.toStringAsFixed(1)} days — reviewing at the scheduled time restores retention before it drops too far.',
+    curve: curvePoints,
+    factors: factors,
+    guidanceTitle: focus != null && !focus.isCorrect ? 'How to improve on ${focus.topic}' : 'Keep up the momentum',
+    guidanceBody: focus?.xai['xai_text'] as String? ??
+        'Review your session summary above, and come back for your next scheduled review to lock in what you\'ve learned.',
+    reportRows: reportRows,
+    generatedAt: DateTime.now(),
+  );
+}
+
+class _ResultsNavButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  const _ResultsNavButton({required this.icon, required this.label, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    final score   = (widget.result['score'] as num?)?.toDouble() ?? 0;
-    final correct = widget.result['correct'] as int? ?? 0;
-    final total   = widget.result['total'] as int? ?? 0;
-    final pct     = (score * 100).round();
-    final results = (widget.result['results'] as List? ?? [])
-        .map((r) => QuestionResult.fromJson(r as Map<String, dynamic>))
-        .toList();
-    final curve   = widget.result['forgetting_curve'] as Map<String, dynamic>? ?? {};
-    final mastery = widget.result['mastery_reached'] as bool? ?? false;
-
-    return Column(
-      children: [
-        // ── Score header ──────────────────────────────────────────────────
-        Container(
-          padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-          color: Colors.white,
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  // Score circle
-                  Container(
-                    width: 72,
-                    height: 72,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: pct >= 70
-                          ? const Color(0xFFDCFCE7)
-                          : const Color(0xFFFEE2E2),
-                      border: Border.all(
-                          color: pct >= 70
-                              ? const Color(0xFF16A34A)
-                              : const Color(0xFFDC2626),
-                          width: 2.5),
-                    ),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Text('$pct%',
-                            style: GoogleFonts.dmSans(
-                                fontSize: 18,
-                                fontWeight: FontWeight.w800,
-                                color: pct >= 70
-                                    ? const Color(0xFF16A34A)
-                                    : const Color(0xFFDC2626))),
-                        Text('$correct/$total',
-                            style: GoogleFonts.dmSans(
-                                fontSize: 10,
-                                color: const Color(0xFF9CA3AF))),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 18),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          mastery
-                              ? '🎓 Mastery Achieved!'
-                              : pct >= 70
-                                  ? '🎯 Great Session!'
-                                  : '📖 Keep Practising!',
-                          style: GoogleFonts.dmSans(
-                              fontSize: 17,
-                              fontWeight: FontWeight.w800,
-                              color: const Color(0xFF1B2A4A)),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Next review: in ${widget.result['next_review_days']} days (${widget.result['next_review_date']})',
-                          style: GoogleFonts.dmSans(
-                              fontSize: 12.5,
-                              color: const Color(0xFF4F6EAB),
-                              fontWeight: FontWeight.w600),
-                        ),
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          children: [
-                            _Chip(
-                                label: '📊 ${curve['stability']?.toStringAsFixed(1) ?? '-'} stability',
-                                color: const Color(0xFF6366F1)),
-                            _Chip(
-                                label: '🔁 ${curve['next_review_days']}d gap',
-                                color: const Color(0xFF0EA5E9)),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 14),
-              TabBar(
-                controller: _tabs,
-                labelColor: const Color(0xFF4F6EAB),
-                unselectedLabelColor: const Color(0xFF9CA3AF),
-                indicatorColor: const Color(0xFF4F6EAB),
-                indicatorWeight: 2,
-                labelStyle: GoogleFonts.dmSans(fontWeight: FontWeight.w700, fontSize: 13),
-                tabs: const [
-                  Tab(text: 'Summary'),
-                  Tab(text: 'XAI Explanations'),
-                  Tab(text: 'Review Schedule'),
-                ],
-              ),
-            ],
-          ),
-        ),
-
-        // ── Tab views ─────────────────────────────────────────────────────
-        Expanded(
-          child: TabBarView(
-            controller: _tabs,
-            children: [
-              _SummaryTab(results: results),
-              _XaiTab(results: results),
-              _ScheduleTab(curve: curve),
-            ],
-          ),
-        ),
-      ],
+    return OutlinedButton.icon(
+      onPressed: onTap,
+      icon: Icon(icon, size: 18),
+      label: Text(label, style: GoogleFonts.dmSans(fontWeight: FontWeight.w700, fontSize: 13)),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: AppColors.primary,
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        side: const BorderSide(color: Color(0xFFE5E7EB)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ),
     );
   }
 }
@@ -1309,109 +2123,24 @@ class _Chip extends StatelessWidget {
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: color.withOpacity(0.25)),
         ),
-        child: Text(label,
-            style: GoogleFonts.dmSans(
-                color: color, fontSize: 11, fontWeight: FontWeight.w600)),
+        child: Text(label, style: GoogleFonts.dmSans(color: color, fontSize: 11, fontWeight: FontWeight.w600)),
       );
 }
 
-class _SummaryTab extends StatelessWidget {
-  final List<QuestionResult> results;
-  const _SummaryTab({required this.results});
-
-  @override
-  Widget build(BuildContext context) => ListView.builder(
-        padding: const EdgeInsets.all(16),
-        itemCount: results.length,
-        itemBuilder: (ctx, i) {
-          final r     = results[i];
-          final color = r.isCorrect ? const Color(0xFF16A34A) : const Color(0xFFDC2626);
-          return Container(
-            margin: const EdgeInsets.only(bottom: 10),
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: color.withOpacity(0.2)),
-            ),
-            child: Row(
-              children: [
-                Icon(r.isCorrect ? Icons.check_circle : Icons.cancel,
-                    color: color, size: 20),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        r.questionText.length > 70
-                            ? '${r.questionText.substring(0, 70)}…'
-                            : r.questionText,
-                        style: GoogleFonts.dmSans(
-                            fontSize: 13,
-                            color: const Color(0xFF1B2A4A),
-                            height: 1.4),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Your answer: ${r.options[r.selectedIndex]}',
-                        style: GoogleFonts.dmSans(
-                            fontSize: 12,
-                            color: color.withOpacity(0.85),
-                            fontWeight: FontWeight.w600),
-                      ),
-                      if (!r.isCorrect)
-                        Text(
-                          '✓ ${r.options[r.correctIndex]}',
-                          style: GoogleFonts.dmSans(
-                              fontSize: 12,
-                              color: const Color(0xFF16A34A),
-                              fontWeight: FontWeight.w600),
-                        ),
-                    ],
-                  ),
-                ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text('${r.timeTaken.toStringAsFixed(0)}s',
-                        style: GoogleFonts.dmSans(
-                            fontSize: 11, color: const Color(0xFF9CA3AF))),
-                    if (r.hintsUsed > 0)
-                      Text('💡${r.hintsUsed}',
-                          style: GoogleFonts.dmSans(
-                              fontSize: 11, color: const Color(0xFFF59E0B))),
-                  ],
-                ),
-              ],
-            ),
-          );
-        },
-      );
-}
-
-class _XaiTab extends StatelessWidget {
-  final List<QuestionResult> results;
-  const _XaiTab({required this.results});
-
-  @override
-  Widget build(BuildContext context) => ListView.builder(
-        padding: const EdgeInsets.all(16),
-        itemCount: results.length,
-        itemBuilder: (ctx, i) => _XaiCard(result: results[i], index: i),
-      );
-}
-
-class _XaiCard extends StatefulWidget {
-  final QuestionResult result;
+/// One question's full review, merged into a single card: your answer vs
+/// correct answer up front, then an expandable section with the XAI
+/// explanation, hints used, and timing — replacing what used to be two
+/// separate tabs (Summary + XAI Explanations) the student had to flip between.
+class _ResultCard extends StatefulWidget {
   final int index;
-  const _XaiCard({required this.result, required this.index});
+  final QuestionResult result;
+  const _ResultCard({required this.index, required this.result});
 
   @override
-  State<_XaiCard> createState() => _XaiCardState();
+  State<_ResultCard> createState() => _ResultCardState();
 }
 
-class _XaiCardState extends State<_XaiCard> {
+class _ResultCardState extends State<_ResultCard> {
   bool _expanded = false;
 
   @override
@@ -1431,28 +2160,49 @@ class _XaiCardState extends State<_XaiCard> {
         children: [
           InkWell(
             onTap: () => setState(() => _expanded = !_expanded),
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+            borderRadius: BorderRadius.vertical(top: const Radius.circular(12), bottom: Radius.circular(_expanded ? 0 : 12)),
             child: Padding(
               padding: const EdgeInsets.all(14),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(r.isCorrect ? Icons.check_circle : Icons.cancel,
-                      color: color, size: 18),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      'Q${widget.index + 1}. ${r.topic}',
-                      style: GoogleFonts.dmSans(
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w700,
-                          color: const Color(0xFF1B2A4A)),
-                    ),
+                  Row(
+                    children: [
+                      Icon(r.isCorrect ? Icons.check_circle : Icons.cancel, color: color, size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text('Q${widget.index + 1}. ${r.topic}',
+                            style: GoogleFonts.dmSans(fontSize: 13.5, fontWeight: FontWeight.w700, color: AppColors.primary)),
+                      ),
+                      if (r.hintsUsed.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: Text('💡${r.hintsUsed.length}',
+                              style: GoogleFonts.dmSans(fontSize: 11, color: const Color(0xFFF59E0B))),
+                        ),
+                      if (r.timedOut)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: Icon(Icons.timer_off_outlined, size: 14, color: const Color(0xFFDC2626)),
+                        ),
+                      Icon(_expanded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down, color: AppColors.textFaint),
+                    ],
                   ),
-                  Icon(
-                    _expanded
-                        ? Icons.keyboard_arrow_up
-                        : Icons.keyboard_arrow_down,
-                    color: const Color(0xFF9CA3AF),
+                  const SizedBox(height: 10),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: _AnswerBadge(label: 'YOUR ANSWER', text: r.yourAnswerText, color: color, bg: color.withOpacity(0.06)),
+                      ),
+                      if (!r.isCorrect) ...[
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _AnswerBadge(
+                              label: 'CORRECT', text: r.correctAnswerText, color: const Color(0xFF16A34A), bg: const Color(0xFFDCFCE7)),
+                        ),
+                      ],
+                    ],
                   ),
                 ],
               ),
@@ -1465,96 +2215,79 @@ class _XaiCardState extends State<_XaiCard> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Divider(color: color.withOpacity(0.15)),
-                  const SizedBox(height: 8),
-                  // Answer summary
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _AnswerBadge(
-                          label:  'YOUR ANSWER',
-                          text:   r.options[r.selectedIndex],
-                          color:  color,
-                          bg:     color.withOpacity(0.06),
-                        ),
+                  const SizedBox(height: 4),
+                  if (r.timedOut) ...[
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFEF2F2),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: const Color(0xFFFECACA)),
                       ),
-                      if (!r.isCorrect) ...[
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: _AnswerBadge(
-                            label: 'CORRECT',
-                            text:  r.options[r.correctIndex],
-                            color: const Color(0xFF16A34A),
-                            bg:    const Color(0xFFDCFCE7),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.timer_off_outlined, color: Color(0xFFDC2626), size: 13),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              r.continuedAfterTimeout
+                                  ? 'Timed out at ${r.timeAllottedSeconds}s — you continued for +${r.overtimeSeconds.toStringAsFixed(0)}s more'
+                                  : 'Timed out at ${r.timeAllottedSeconds}s — moved on without finishing',
+                              style: GoogleFonts.dmSans(fontSize: 11.5, color: const Color(0xFFB91C1C), fontWeight: FontWeight.w600),
+                            ),
                           ),
-                        ),
-                      ],
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  // XAI text
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                  if (r.hintsUsed.isNotEmpty) ...[
+                    Text('HINTS USED (${r.hintsUsed.length})',
+                        style: GoogleFonts.dmSans(fontSize: 9.5, fontWeight: FontWeight.w800, letterSpacing: 0.6, color: const Color(0xFFB45309))),
+                    const SizedBox(height: 4),
+                    ...r.hintsUsed.map((h) => Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: Text('Lv ${h['level']}: ${h['hint_text']}',
+                              style: GoogleFonts.dmSans(fontSize: 11.5, color: const Color(0xFF92400E), height: 1.4)),
+                        )),
+                    const SizedBox(height: 10),
+                  ],
                   Container(
                     padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
                       color: const Color(0xFFF0F4FF),
                       borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: const Color(0xFF4F6EAB).withOpacity(0.2)),
+                      border: Border.all(color: AppColors.accent.withOpacity(0.2)),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Row(
                           children: [
-                            const Icon(Icons.psychology_outlined,
-                                color: Color(0xFF4F6EAB), size: 15),
+                            const Icon(Icons.psychology_outlined, color: AppColors.accent, size: 15),
                             const SizedBox(width: 6),
-                            Text('AI EXPLANATION',
+                            Text('WHY',
                                 style: GoogleFonts.dmSans(
-                                    color: const Color(0xFF4F6EAB),
-                                    fontSize: 10.5,
-                                    fontWeight: FontWeight.w700,
-                                    letterSpacing: 0.8)),
-                            const Spacer(),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF4F6EAB).withOpacity(0.1),
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              child: Text(
-                                '+${((xai['confidence_boost'] as num?)?.toDouble() ?? 0.5 * 100).round()}% confidence',
-                                style: const TextStyle(
-                                    color: Color(0xFF4F6EAB), fontSize: 10),
-                              ),
-                            ),
+                                    color: AppColors.accent, fontSize: 10.5, fontWeight: FontWeight.w700, letterSpacing: 0.8)),
                           ],
                         ),
-                        const SizedBox(height: 10),
-                        Text(
-                          xai['xai_text'] as String? ?? '',
-                          style: GoogleFonts.dmSans(
-                              fontSize: 13,
-                              color: const Color(0xFF374151),
-                              height: 1.65),
-                        ),
+                        const SizedBox(height: 8),
+                        Text(xai['xai_text'] as String? ?? '',
+                            style: GoogleFonts.dmSans(fontSize: 13, color: const Color(0xFF374151), height: 1.6)),
                         if ((xai['review_topics'] as List?)?.isNotEmpty == true) ...[
                           const SizedBox(height: 10),
                           Wrap(
                             spacing: 6,
                             children: (xai['review_topics'] as List)
                                 .map((t) => Container(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 8, vertical: 3),
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                       decoration: BoxDecoration(
                                         color: const Color(0xFFEFF6FF),
                                         borderRadius: BorderRadius.circular(6),
-                                        border: Border.all(
-                                            color: const Color(0xFFBFDBFE)),
+                                        border: Border.all(color: const Color(0xFFBFDBFE)),
                                       ),
-                                      child: Text(t.toString(),
-                                          style: GoogleFonts.dmSans(
-                                              fontSize: 11,
-                                              color: const Color(0xFF1D4ED8))),
+                                      child: Text(t.toString(), style: GoogleFonts.dmSans(fontSize: 11, color: const Color(0xFF1D4ED8))),
                                     ))
                                 .toList(),
                           ),
@@ -1574,220 +2307,94 @@ class _XaiCardState extends State<_XaiCard> {
 class _AnswerBadge extends StatelessWidget {
   final String label, text;
   final Color color, bg;
-  const _AnswerBadge(
-      {required this.label,
-      required this.text,
-      required this.color,
-      required this.bg});
+  const _AnswerBadge({required this.label, required this.text, required this.color, required this.bg});
 
   @override
   Widget build(BuildContext context) => Container(
         padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-            color: bg, borderRadius: BorderRadius.circular(8)),
+        decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(8)),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(label,
-                style: TextStyle(
-                    color: color,
-                    fontSize: 9.5,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 0.8)),
+            Text(label, style: TextStyle(color: color, fontSize: 9.5, fontWeight: FontWeight.w800, letterSpacing: 0.8)),
             const SizedBox(height: 3),
-            Text(text,
-                style: GoogleFonts.dmSans(
-                    fontSize: 12.5,
-                    color: const Color(0xFF1B2A4A),
-                    fontWeight: FontWeight.w600)),
+            Text(text, style: GoogleFonts.dmSans(fontSize: 12.5, color: AppColors.primary, fontWeight: FontWeight.w600)),
           ],
         ),
       );
 }
 
-class _ScheduleTab extends StatelessWidget {
+/// Plain-language "when to come back" card. Intentionally does NOT expose
+/// the internal method name (Ebbinghaus), the raw decay formula, or the
+/// "stability" number — those are how the system computes the date, not
+/// something the student needs to interpret. It only ever shows the ONE
+/// upcoming date that's actually confirmed for this student right now;
+/// see the note below about why further-out dates aren't listed here.
+class _NextReviewCard extends StatelessWidget {
   final Map<String, dynamic> curve;
-  const _ScheduleTab({required this.curve});
+  final dynamic nextDays;
+  final String? nextDate;
+  final bool mastery;
+  const _NextReviewCard({required this.curve, required this.nextDays, required this.nextDate, required this.mastery});
 
   @override
   Widget build(BuildContext context) {
-    final sessions = (curve['next_sessions'] as List? ?? [])
-        .cast<Map<String, dynamic>>();
-    final stability    = (curve['stability'] as num?)?.toDouble() ?? 1.0;
-    final optimalGap   = (curve['optimal_gap_days'] as num?)?.toDouble() ?? 3.0;
-    final formula      = curve['formula'] as String? ?? 'R(t) = e^(-t/S)';
-    final mastery      = curve['mastery_reached'] as bool? ?? false;
-
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        // Ebbinghaus info card
-        Container(
-          padding: const EdgeInsets.all(16),
-          margin: const EdgeInsets.only(bottom: 14),
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [Color(0xFF1B2A4A), Color(0xFF2D4A7A)],
-            ),
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(colors: [AppColors.primary, Color(0xFF2D4A7A)]),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             children: [
-              Row(
-                children: [
-                  const Icon(Icons.show_chart, color: Colors.white, size: 18),
-                  const SizedBox(width: 8),
-                  Text('Ebbinghaus Forgetting Curve',
-                      style: GoogleFonts.dmSans(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w800,
-                          fontSize: 14)),
-                ],
-              ),
-              const SizedBox(height: 14),
-              Row(
-                children: [
-                  _CurveStatBox(label: 'Stability', value: stability.toStringAsFixed(2)),
-                  const SizedBox(width: 10),
-                  _CurveStatBox(label: 'Optimal Gap', value: '${optimalGap.toStringAsFixed(1)}d'),
-                  const SizedBox(width: 10),
-                  _CurveStatBox(label: 'Threshold', value: '80%'),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Text(formula,
-                  style: GoogleFonts.sourceCodePro(
-                      color: const Color(0xFF93C5FD), fontSize: 12.5)),
-              if (mastery) ...[
-                const SizedBox(height: 10),
+              const Icon(Icons.event_available_outlined, color: Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Text('Your Next Review',
+                  style: GoogleFonts.dmSans(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 15)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            mastery
+                ? 'You\'ve mastered this topic — we\'ll check back with a light maintenance review.'
+                : 'Timed to when you\'re most likely to be about to forget this — reviewing now locks it in.',
+            style: GoogleFonts.dmSans(color: Colors.white.withOpacity(0.75), fontSize: 12.5, height: 1.5),
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(color: Colors.white.withOpacity(0.1), borderRadius: BorderRadius.circular(10)),
+            child: Row(
+              children: [
                 Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF16A34A).withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                        color: const Color(0xFF16A34A).withOpacity(0.4)),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(color: Colors.white.withOpacity(0.15), borderRadius: BorderRadius.circular(10)),
+                  child: const Icon(Icons.notifications_active_outlined, color: Colors.white, size: 20),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.star, color: Color(0xFFFFD700), size: 14),
-                      const SizedBox(width: 6),
-                      Text('Mastery reached — content in long-term memory',
-                          style: GoogleFonts.dmSans(
-                              color: Colors.white, fontSize: 11.5)),
+                      Text('In $nextDays day${nextDays == 1 ? '' : 's'}',
+                          style: GoogleFonts.dmSans(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16)),
+                      if (nextDate != null)
+                        Text(nextDate!, style: GoogleFonts.dmSans(color: Colors.white.withOpacity(0.65), fontSize: 12)),
                     ],
                   ),
                 ),
               ],
-            ],
+            ),
           ),
-        ),
-
-        Text('YOUR REVIEW SCHEDULE',
-            style: GoogleFonts.dmSans(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                color: const Color(0xFF9CA3AF),
-                letterSpacing: 1)),
-        const SizedBox(height: 10),
-
-        ...sessions.asMap().entries.map((e) {
-          final i    = e.key;
-          final s    = e.value;
-          final isNext = i == 0;
-          return Container(
-            margin: const EdgeInsets.only(bottom: 10),
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                  color: isNext
-                      ? const Color(0xFF4F6EAB)
-                      : const Color(0xFFE5E7EB),
-                  width: isNext ? 1.5 : 1),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 32,
-                  height: 32,
-                  decoration: BoxDecoration(
-                    color: isNext
-                        ? const Color(0xFF4F6EAB)
-                        : const Color(0xFFF3F4F6),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Center(
-                    child: Text('${s['session']}',
-                        style: TextStyle(
-                            color: isNext
-                                ? Colors.white
-                                : const Color(0xFF6B7280),
-                            fontWeight: FontWeight.w700,
-                            fontSize: 13)),
-                  ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Text('Review Session ${s['session']}',
-                      style: GoogleFonts.dmSans(
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w600,
-                          color: const Color(0xFF1B2A4A))),
-                ),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(
-                      'In ${s['days_from_now']} day${(s['days_from_now'] as int) != 1 ? 's' : ''}',
-                      style: GoogleFonts.dmSans(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: const Color(0xFF4F6EAB)),
-                    ),
-                    Text(s['date'] as String? ?? '',
-                        style: GoogleFonts.dmSans(
-                            fontSize: 11.5, color: const Color(0xFF9CA3AF))),
-                  ],
-                ),
-              ],
-            ),
-          );
-        }),
-      ],
+          const SizedBox(height: 10),
+          Text('We\'ll also remind you on your dashboard when it\'s time.',
+              style: GoogleFonts.dmSans(color: Colors.white.withOpacity(0.55), fontSize: 11)),
+        ],
+      ),
     );
   }
-}
-
-class _CurveStatBox extends StatelessWidget {
-  final String label, value;
-  const _CurveStatBox({required this.label, required this.value});
-
-  @override
-  Widget build(BuildContext context) => Expanded(
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.08),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Column(
-            children: [
-              Text(value,
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 16)),
-              const SizedBox(height: 2),
-              Text(label,
-                  style: TextStyle(
-                      color: Colors.white.withOpacity(0.6), fontSize: 10)),
-            ],
-          ),
-        ),
-      );
 }

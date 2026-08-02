@@ -1,14 +1,21 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import '../models/teacher_models.dart';
+import '../theme/app_theme.dart';
 
-const Color neuromathixNavy = Color(0xFF10345E);
-const Color neuromathixBlue = Color(0xFF1B63E8);
-const Color neuromathixText = Color(0xFF11131B);
-const Color neuromathixMuted = Color(0xFF687694);
-const Color neuromathixBorder = Color(0xFFE4E8F0);
-const Color neuromathixSurface = Color(0xFFF8FAFD);
+// Previously this file DUPLICATED these six constants as its own separate
+// declaration (student_app_shell.dart had an identical-but-independent
+// copy) — editing one palette without the other is exactly how the student
+// and teacher shells drifted into looking different. Both now point at the
+// same single source: lib/theme/app_theme.dart.
+const Color neuromathixNavy = AppColors.primary;
+const Color neuromathixBlue = AppColors.accent;
+const Color neuromathixText = AppColors.textDark;
+const Color neuromathixMuted = AppColors.textMuted;
+const Color neuromathixBorder = AppColors.border;
+const Color neuromathixSurface = AppColors.surface;
 
 class TeacherAppShell extends StatelessWidget {
   final TeacherNavSection activeSection;
@@ -54,7 +61,7 @@ class TeacherAppShell extends StatelessWidget {
               centerTitle: false,
               title: Text(
                 'Hi, $userName',
-                style: const TextStyle(fontWeight: FontWeight.w800),
+                style: GoogleFonts.dmSans(fontWeight: FontWeight.w800, color: AppColors.textDark),
               ),
               actions: [
                 NotificationBell(count: notificationCount),
@@ -125,10 +132,10 @@ class TeacherTopBar extends StatelessWidget {
             children: [
               Text(
                 'Hi, $userName',
-                style: TextStyle(
+                style: GoogleFonts.dmSans(
                   fontSize: isSmall ? 22 : 28,
                   fontWeight: FontWeight.w800,
-                  color: neuromathixText,
+                  color: AppColors.textDark,
                 ),
               ),
               const Spacer(),
@@ -184,10 +191,10 @@ class TeacherSidebar extends StatelessWidget {
                   const Icon(Icons.psychology_outlined, color: Colors.white, size: 34),
                   if (expanded) ...[
                     const SizedBox(width: 12),
-                    const Expanded(
+                    Expanded(
                       child: Text(
                         'NEUROMATHIX',
-                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                        style: GoogleFonts.dmSans(color: Colors.white, fontWeight: FontWeight.w700),
                       ),
                     ),
                   ],
@@ -197,7 +204,7 @@ class TeacherSidebar extends StatelessWidget {
             ),
             if (!expanded) ...[
               const SizedBox(height: 6),
-              const Text('NEUROMATHIX', style: TextStyle(color: Colors.white, fontSize: 11)),
+              Text('NEUROMATHIX', style: GoogleFonts.dmSans(color: Colors.white, fontSize: 11)),
             ],
             const SizedBox(height: 38),
             for (final item in items)
@@ -248,11 +255,12 @@ class _SidebarLogoutButton extends StatelessWidget {
           const Icon(Icons.logout_rounded, color: Colors.white, size: 26),
           if (expanded) ...[
             const SizedBox(width: 14),
-            const Text(
+            Text(
               'Logout',
-              style: TextStyle(
+              style: GoogleFonts.dmSans(
                 color: Colors.white,
                 fontWeight: FontWeight.w700,
+                fontSize: 14,
               ),
             ),
           ],
@@ -298,7 +306,7 @@ class _SidebarButton extends StatelessWidget {
           Icon(item.icon, color: Colors.white, size: 28),
           if (expanded) ...[
             const SizedBox(width: 14),
-            Text(item.label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+            Text(item.label, style: GoogleFonts.dmSans(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14)),
           ],
         ],
       ),
@@ -325,25 +333,25 @@ class NotificationBell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 44,
-      height: 44,
+      width: 48,
+      height: 48,
       child: Stack(
         clipBehavior: Clip.none,
         children: [
           const Align(
             alignment: Alignment.center,
-            child: Icon(Icons.notifications_none_rounded, size: 30, color: Colors.black),
+            child: Icon(Icons.notifications_none_rounded, size: 32, color: Colors.black),
           ),
           if (count > 0)
             Positioned(
               right: 0,
               top: 0,
               child: Container(
-                width: 22,
-                height: 22,
+                width: 26,
+                height: 26,
                 alignment: Alignment.center,
-                decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(16)),
-                child: Text('$count', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 13)),
+                decoration: BoxDecoration(color: AppColors.error, borderRadius: BorderRadius.circular(16)),
+                child: Text('$count', style: GoogleFonts.dmSans(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16)),
               ),
             ),
         ],
@@ -362,9 +370,9 @@ class UserInitialAvatar extends StatelessWidget {
     final initial = trimmed.isEmpty ? '?' : trimmed[0].toUpperCase();
 
     return CircleAvatar(
-      radius: 22,
+      radius: 30,
       backgroundColor: const Color(0xFF0D315E),
-      child: Text(initial, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 18)),
+      child: Text(initial, style: GoogleFonts.dmSans(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 26)),
     );
   }
 }
