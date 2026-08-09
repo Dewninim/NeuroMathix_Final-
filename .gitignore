@@ -1,13 +1,53 @@
 # Secrets — never commit
 backend/.env
 
-# Flutter
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+._*
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# VS Code
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
 .dart_tool/
-build/
 .flutter-plugins
 .flutter-plugins-dependencies
-*.iml
+.pub-cache/
+.pub/
+build/
+/build/
+/coverage/
 
-# Python
+# Python backend
 backend/venv/
 backend/__pycache__/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio build artifacts
+/android/app/debug
+/android/app/profile
+/android/app/release
